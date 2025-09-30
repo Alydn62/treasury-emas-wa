@@ -1,0 +1,6 @@
+# .gitignore
+.env
+session-wa-emas/
+node_modules/
+npm-debug.log*
+.DS_Store
