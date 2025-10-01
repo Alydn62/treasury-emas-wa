@@ -1,4 +1,5 @@
 // index.js – WhatsApp bot + healthcheck server untuk Koyeb (tanpa executablePath)
+// versi ini menambahkan logging & handler message_create agar pesan dari diri sendiri juga terlihat
 
 import pkg from "whatsapp-web.js";
 const { Client, LocalAuth } = pkg;
@@ -63,36 +64,44 @@ const client = new Client({
       "--no-zygote",
       "--disable-gpu"
     ]
-    // Tidak perlu executablePath karena base image Puppeteer sudah set Chromium
   }
 });
 
+// ----- lifecycle logs -----
 client.on("qr", (qr) => {
   console.log("📱 Scan QR ini dengan WhatsApp kamu:");
   qrcode.generate(qr, { small: true });
 });
+client.on("authenticated", () => console.log("🔐 Authenticated."));
+client.on("auth_failure", (m) => console.error("🔴 Auth failure:", m));
+client.on("ready", () => console.log("✅ Bot WhatsApp siap!"));
+client.on("disconnected", (r) => console.error("🔌 Disconnected:", r));
 
-client.on("ready", () => {
-  console.log("✅ Bot WhatsApp siap!");
-});
-
+// ----- pesan dari orang lain -----
 client.on("message", async (msg) => {
   const text = (msg.body || "").trim().toLowerCase();
-  console.log(`📨 ${msg.from}: ${text}`);
+  console.log(`📨 message from ${msg.from} | fromMe=${msg.fromMe} | text="${text}"`);
 
   if (text === "emas" || text === "/emas") {
     const rate = await getRate();
     await msg.reply(buildMessage(rate));
     return;
   }
-
   if (text === "help" || text === "/start") {
     await msg.reply("Ketik *emas* untuk cek harga emas terbaru.");
     return;
   }
+});
 
-  // Balasan default
-  await msg.reply("Halo! 👋 Ketik *emas* untuk cek harga emas.");
+// ----- pesan yang kamu kirim sendiri (untuk debug / self-chat) -----
+client.on("message_create", async (msg) => {
+  if (!msg.fromMe) return; // hanya tangani pesan dari diri sendiri (opsional)
+  const text = (msg.body || "").trim().toLowerCase();
+  console.log(`📝 message_create (fromMe) | to=${msg.to} | text="${text}"`);
+  if (text === "emas" || text === "/emas") {
+    const rate = await getRate();
+    await msg.reply(buildMessage(rate));
+  }
 });
 
 client.initialize();
