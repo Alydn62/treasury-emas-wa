@@ -1,29 +1,52 @@
-// index.js – WhatsApp bot + healthcheck + QR image endpoint (Koyeb friendly)
-// - QR login tampil di log (ASCII) & di /qr (gambar)
-// - Healthcheck di /  (port 8000)
-// - Command "emas" ambil harga dari Treasury
+// index.js – WhatsApp bot (realtime Treasury) + healthcheck + QR viewer
+// Optimasi cepat: Undici keep-alive, warm-up, timeout pendek, retry, typing indicator
 
 import pkg from "whatsapp-web.js";
-const { Client, LocalAuth, MessageMedia } = pkg;
+const { Client, LocalAuth } = pkg;
 
 import qrcodeTerminal from "qrcode-terminal";
 import QRCode from "qrcode";
 import express from "express";
 import dotenv from "dotenv";
+// 👇 Undici (fetch bawaan Node) untuk set Agent keep-alive
+import { Agent, setGlobalDispatcher } from "undici";
 
 dotenv.config();
+
+// ---------------- HTTP keep-alive & warm-up ----------------
+const AGENT = new Agent({
+  keepAliveTimeout: 30_000,     // idle socket lifetime
+  keepAliveMaxTimeout: 60_000,  // safety cap
+  pipelining: 1                 // aman untuk API biasa
+});
+setGlobalDispatcher(AGENT);
+
+// preconnect warm-up ke host Treasury saat boot
+async function warmup() {
+  try {
+    // ping ringan dulu ke endpoint yang sama (POST tanpa body)
+    const res = await fetch("https://api.treasury.id/api/v1/antigrvty/gold/rate", {
+      method: "POST",
+      headers: { accept: "application/json" }
+    });
+    // buang hasil; tujuan hanya inisiasi koneksi/DNS/TLS
+    console.log("🔥 Warm-up Treasury:", res.status);
+  } catch (e) {
+    console.warn("⚠️ Warm-up gagal (abaikan):", e?.message || e);
+  }
+}
+warmup().catch(()=>{});
 
 // ---------------- Mini HTTP server (healthcheck & QR viewer) ----------------
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-// simpan QR terakhir (data URL PNG) untuk halaman /qr
 let lastQrDataUrl = "";
 
 app.get("/", (_req, res) => res.send("✅ WA Bot up"));
 
 app.get("/qr", (_req, res) => {
-  if (!lastQrDataUrl) return res.status(404).send("QR belum tersedia. Tunggu beberapa detik lalu refresh.");
+  if (!lastQrDataUrl) return res.status(404).send("QR belum tersedia. Refresh jika kadaluarsa.");
   res.send(`<!doctype html>
   <html><head><meta charset="utf-8"><title>WhatsApp Login QR</title></head>
   <body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif">
@@ -34,47 +57,63 @@ app.get("/qr", (_req, res) => {
     </div>
   </body></html>`);
 });
-
-app.get("/qr.png", (_req, res) => {
-  if (!lastQrDataUrl) return res.status(404).send("QR belum tersedia.");
-  const b64 = lastQrDataUrl.split(",")[1];
-  res.setHeader("Content-Type", "image/png");
-  res.send(Buffer.from(b64, "base64"));
-});
-
 app.listen(PORT, () => console.log(`🌐 Healthcheck server listen on :${PORT}`));
 
-// ---------------- Util & API ----------------
+// ---------------- Utils ----------------
 const rupiah = (n) => "Rp " + new Intl.NumberFormat("id-ID").format(Number(n || 0));
 
-async function getRate() {
+// fetch with timeout
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 2000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch("https://api.treasury.id/api/v1/antigrvty/gold/rate", {
-      method: "POST",
-      headers: { accept: "application/json" }
-    });
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Ambil harga realtime + retry cepat
+async function getRateRealtime() {
+  const doOnce = async () => {
+    const res = await fetchWithTimeout(
+      "https://api.treasury.id/api/v1/antigrvty/gold/rate",
+      { method: "POST", headers: { accept: "application/json" } },
+      // timeout ketat supaya respons terasa cepat; sesuaikan kalau perlu
+      Number(process.env.TREASURY_TIMEOUT_MS || 2000)
+    );
     if (!res.ok) throw new Error("HTTP " + res.status);
     const json = await res.json();
-    const d = json.data || {};
+    const d = json?.data || {};
     const buy = Number(d.buying_rate);
     const sell = Number(d.selling_rate);
     const updated = String(d.updated_at || "");
-    const diff = Math.abs(buy - sell);
-    const spreadPct = buy ? ((diff / buy) * 100).toFixed(2) : "0.00";
-    return { buy, sell, updated, diff, spreadPct };
-  } catch (e) {
-    console.error("❌ Gagal ambil harga:", e);
-    return null;
+    return { buy, sell, updated };
+  };
+
+  try {
+    return await doOnce();
+  } catch (e1) {
+    console.warn("⚠️ Treasury attempt #1 gagal:", e1?.message || e1);
+    // retry cepat sekali lagi (cadangan)
+    try {
+      return await doOnce();
+    } catch (e2) {
+      console.error("❌ Treasury attempt #2 gagal:", e2?.message || e2);
+      return null;
+    }
   }
 }
 
 function buildRateMsg(r) {
-  if (!r) return "⚠️ Tidak bisa mengambil harga emas sekarang.";
+  if (!r) return "⚠️ Gagal ambil harga realtime. Coba lagi sebentar ya.";
+  const diff = Math.abs((r.buy || 0) - (r.sell || 0));
+  const spreadPct = r.buy ? ((diff / r.buy) * 100).toFixed(2) : "0.00";
   return [
     "💰 Harga Emas Treasury (per gram)",
-    `• Beli : ${rupiah(r.buy)}`,
-    `• Jual : ${rupiah(r.sell)}`,
-    `• Selisih: ${rupiah(r.diff)} (Spread ${r.spreadPct}%)`,
+    `• Beli   : ${rupiah(r.buy)}`,
+    `• Jual   : ${rupiah(r.sell)}`,
+    `• Selisih: ${rupiah(diff)} (Spread ${spreadPct}%)`,
     `• Update : ${r.updated} (WIB)`
   ].join("\n");
 }
@@ -92,56 +131,76 @@ const client = new Client({
       "--no-zygote",
       "--disable-gpu"
     ]
-    // Tidak perlu executablePath karena kita pakai base image Puppeteer di Dockerfile
   }
 });
 
-// Lifecycle logs
+// lifecycle & QR
 client.on("qr", async (qr) => {
-  console.log("📱 Scan QR ini dengan WhatsApp kamu (atau buka /qr):");
+  console.log("📱 Scan QR ini (atau buka /qr):");
   qrcodeTerminal.generate(qr, { small: true });
-  // simpan QR jadi dataURL untuk halaman /qr
   try {
     lastQrDataUrl = await QRCode.toDataURL(qr, { margin: 1, width: 320 });
-  } catch (e) {
-    console.error("Gagal buat dataURL QR:", e);
-  }
+  } catch {}
 });
-
 client.on("authenticated", () => console.log("🔐 Authenticated."));
 client.on("auth_failure", (m) => console.error("🔴 Auth failure:", m));
 client.on("ready", () => console.log("✅ Bot WhatsApp siap!"));
 client.on("disconnected", (r) => console.error("🔌 Disconnected:", r));
 
-// Pesan dari orang lain
+// helper balas dengan fallback + typing indicator
+async function safeReplyRealtime(text, msg) {
+  try {
+    await msg.reply(text);
+  } catch (e) {
+    console.warn("reply() gagal, fallback sendMessage:", e?.message);
+    try {
+      await client.sendMessage(msg.from, text);
+    } catch (ee) {
+      console.error("sendMessage() gagal:", ee);
+    }
+  }
+}
+
+async function handleEmasRealtime(msg) {
+  try {
+    // tampilkan indicator mengetik supaya user tahu bot sedang ambil data
+    const chat = await msg.getChat();
+    chat.sendStateTyping();
+
+    const rate = await getRateRealtime();
+    await safeReplyRealtime(buildRateMsg(rate), msg);
+
+    // selesai mengetik
+    chat.clearState();
+  } catch (e) {
+    console.error("🔴 Handler emas error:", e);
+    try { (await msg.getChat()).clearState(); } catch {}
+    await safeReplyRealtime("⚠️ Terjadi error saat ambil harga.", msg);
+  }
+}
+
+// handlers
 client.on("message", async (msg) => {
-  const textRaw = (msg.body || "");
-  const text = textRaw.trim();
+  const text = (msg.body || "").trim();
   const lower = text.toLowerCase();
   console.log(`📨 from=${msg.from} | fromMe=${msg.fromMe} | text="${text}"`);
 
   if (lower === "emas" || lower === "/emas") {
-    const rate = await getRate();
-    await msg.reply(buildRateMsg(rate));
+    await handleEmasRealtime(msg);
     return;
   }
-
   if (lower === "help" || lower === "/start") {
-    await msg.reply("Perintah:\n• emas — harga emas terbaru");
+    await safeReplyRealtime("Perintah:\n• emas — harga emas realtime Treasury", msg);
     return;
   }
-
-  // default
-  await msg.reply("Halo! 👋 Ketik *emas* untuk cek harga emas, atau *help* untuk daftar perintah.");
+  await safeReplyRealtime("Halo! 👋 Ketik *emas* untuk cek harga emas realtime, atau *help* untuk daftar perintah.", msg);
 });
 
-// Pesan yang kamu kirim sendiri (self-chat) — berguna untuk testing cepat
 client.on("message_create", async (msg) => {
   if (!msg.fromMe) return;
   const t = (msg.body || "").trim().toLowerCase();
   if (t === "emas" || t === "/emas") {
-    const rate = await getRate();
-    await msg.reply(buildRateMsg(rate));
+    await handleEmasRealtime(msg);
   }
 });
 
