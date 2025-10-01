@@ -1,12 +1,12 @@
-import makeWASocket, { useMultiFileAuthState } from "@whiskeysockets/baileys"
-import fetch from "node-fetch"
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys"
 import express from "express"
+import fetch from "node-fetch"
 import qrcode from "qrcode"
 
 const app = express()
-let qrCodeData = ""
+let qrString = ""
 
-// === Ambil harga emas dari Treasury ===
+// === API Treasury: Ambil Harga Emas ===
 async function getHargaEmas() {
   try {
     const res = await fetch("https://api.treasury.id/api/v1/antigrvty/gold/rate", {
@@ -21,21 +21,8 @@ async function getHargaEmas() {
     const data = await res.json()
     console.log("🔍 Data API Treasury:", JSON.stringify(data, null, 2))
 
-    // Cari harga Buy / Sell di beberapa kemungkinan struktur JSON
-    const buy =
-      data?.data?.buy ||
-      data?.data?.price?.buy ||
-      data?.price?.buy ||
-      data?.buy ||
-      null
-
-    const sell =
-      data?.data?.sell ||
-      data?.data?.price?.sell ||
-      data?.price?.sell ||
-      data?.sell ||
-      null
-
+    const buy = data?.data?.buying_rate || null
+    const sell = data?.data?.selling_rate || null
     if (!buy || !sell) return "❌ Gagal ambil harga emas"
 
     const jam = new Date().toLocaleTimeString("id-ID", {
@@ -51,25 +38,24 @@ async function getHargaEmas() {
   }
 }
 
-// === Bot WhatsApp ===
+// === Mulai WhatsApp Bot ===
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState("session")
-
   const sock = makeWASocket({
     auth: state,
     printQRInTerminal: false
   })
 
-  // Update koneksi / QR
+  // QR Code muncul di /qr
   sock.ev.on("connection.update", async (update) => {
     const { connection, qr } = update
     if (qr) {
-      qrCodeData = await qrcode.toDataURL(qr)
+      qrString = await qrcode.toDataURL(qr)
       console.log("📲 QR diterima, buka http://localhost:8000/qr untuk scan")
     }
     if (connection === "close") {
       console.log("❌ Koneksi terputus, mencoba reconnect...")
-      setTimeout(startBot, 20000) // auto reconnect 20 detik
+      startBot()
     } else if (connection === "open") {
       console.log("✅ Bot WhatsApp siap dengan Baileys!")
     }
@@ -77,33 +63,34 @@ async function startBot() {
 
   sock.ev.on("creds.update", saveCreds)
 
-  // Listener pesan
+  // === Tangani pesan masuk ===
   sock.ev.on("messages.upsert", async ({ messages }) => {
     const msg = messages[0]
     if (!msg.message) return
+    if (msg.key.fromMe) return // hindari balas pesan bot sendiri
 
     const from = msg.key.remoteJid
-    const pesan =
-      msg.message?.conversation ||
-      msg.message?.extendedTextMessage?.text ||
-      ""
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || ""
 
-    console.log("📨 Pesan masuk:", from, pesan)
+    console.log(`📨 Pesan masuk dari ${from}: ${text}`)
 
-    // Balas hanya untuk keyword "emas"
-    if (pesan && pesan.toLowerCase().trim() === "emas") {
-      const harga = await getHargaEmas()
-      await sock.sendMessage(from, { text: harga })
+    if (text.toLowerCase().includes("emas")) {
+      const reply = await getHargaEmas()
+      await sock.sendMessage(from, { text: reply }, { quoted: msg })
     }
   })
 }
 
-startBot()
-
 // === Web server untuk QR ===
 app.get("/qr", (req, res) => {
-  if (!qrCodeData) return res.send("Belum ada QR, tunggu sebentar...")
-  res.send(`<h2>Scan QR WhatsApp</h2><img src="${qrCodeData}" />`)
+  if (!qrString) {
+    return res.send("❌ QR belum tersedia, tunggu sebentar...")
+  }
+  res.send(`<img src="${qrString}" style="width:300px"/>`)
 })
 
-app.listen(8000, () => console.log("🌐 Healthcheck server listen on :8000"))
+app.listen(8000, () => {
+  console.log("🌐 Healthcheck server listen on :8000")
+})
+
+startBot()
