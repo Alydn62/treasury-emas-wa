@@ -1,6 +1,8 @@
 // index.js – WhatsApp bot + healthcheck server untuk Koyeb (tanpa executablePath)
 
-import { Client, LocalAuth } from "whatsapp-web.js";
+import pkg from "whatsapp-web.js";
+const { Client, LocalAuth } = pkg;
+
 import qrcode from "qrcode-terminal";
 import express from "express";
 import dotenv from "dotenv";
