@@ -6,25 +6,25 @@ const app = express()
 const PORT = process.env.PORT || 8000
 
 // Endpoint healthcheck + QR
-app.get("/", (req, res) => res.send("Bot is running"))
 let latestQR = null
+app.get("/", (req, res) => res.send("Bot is running"))
 app.get("/qr", (req, res) => {
     if (!latestQR) return res.send("QR belum tersedia, cek terminal")
-    res.send(`<img src="${latestQR}" />`)
+    res.send(`<img src="https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(latestQR)}"/>`)
 })
-app.listen(PORT, () => console.log(`🌐 Healthcheck server listen on :${PORT}`))
+app.listen(PORT, () => console.log(`🌐 Server listen on :${PORT}`))
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState("session")
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true, // QR di terminal
+        printQRInTerminal: true
     })
 
     sock.ev.on("connection.update", (update) => {
         const { connection, lastDisconnect, qr } = update
         if (qr) {
-            latestQR = `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(qr)}`
+            latestQR = qr
             console.log("📲 QR diterima, buka /qr untuk scan")
         }
         if (connection === "close") {
@@ -68,13 +68,15 @@ async function startBot() {
         if (!msg.message) return
 
         const pesan = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").toLowerCase()
-        const from = msg.key.remoteJid  // <<--- inilah ID pengirim/chat
+        const from = msg.key.remoteJid // <<--- target balasan selalu ke pengirim/grup
+        const isMe = msg.key.fromMe // apakah pesan dari diri sendiri
 
         console.log("📨 Pesan masuk dari", from, ":", pesan)
 
-        if (pesan.includes("emas")) {
+        // Hanya balas kalau bukan dari diri sendiri
+        if (!isMe && pesan.includes("emas")) {
             const reply = await getHargaEmas()
-            await sock.sendMessage(from, { text: reply })  // <<--- balas ke pengirim
+            await sock.sendMessage(from, { text: reply })
         }
     })
 }
