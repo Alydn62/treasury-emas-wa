@@ -1,72 +1,71 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
-import qrcode from "qrcode-terminal";
+import makeWASocket, { useMultiFileAuthState } from "@whiskeysockets/baileys";
+import fetch from "node-fetch";
 import express from "express";
-import { fetch } from "undici";
 
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState("session-baileys");
+// 🔹 Fungsi ambil harga emas dari Treasury
+async function getHargaEmas() {
+  try {
+    const res = await fetch("https://api.treasury.id/api/v1/antigrvty/gold/rate", {
+      method: "POST",
+      headers: {
+        "accept": "application/json",
+        "content-type": "application/json",
+      },
+      body: "{}"
+    });
 
+    const data = await res.json();
+    console.log("Response Treasury:", data);
+
+    if (data?.data?.price) {
+      return {
+        buy: data.data.price.buy,
+        sell: data.data.price.sell
+      };
+    } else {
+      return { buy: "-", sell: "-" };
+    }
+  } catch (err) {
+    console.error("❌ Gagal fetch API Treasury:", err);
+    return { buy: "-", sell: "-" };
+  }
+}
+
+// 🔹 Inisialisasi Baileys
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
   const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true
+    printQRInTerminal: true, // QR tampil di terminal
   });
 
-  sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) {
-      qrcode.generate(qr, { small: true });
-    }
-    if (connection === "close") {
-      const shouldReconnect =
-        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log("connection closed. reconnect:", shouldReconnect);
-      if (shouldReconnect) {
-        setTimeout(() => startBot(), 20_000); // reconnect 20 detik
-      }
-    } else if (connection === "open") {
-      console.log("✅ Bot WhatsApp siap dengan Baileys!");
-    }
-  });
-
+  // Event untuk simpan kredensial
   sock.ev.on("creds.update", saveCreds);
 
+  // Event pesan masuk
   sock.ev.on("messages.upsert", async ({ messages }) => {
     const msg = messages[0];
-    if (!msg.message) return;
+    if (!msg.message || msg.key.fromMe) return;
+
     const from = msg.key.remoteJid;
     const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
 
-    console.log("📨", from, text);
+    console.log(`📩 Pesan masuk dari ${from}: ${text}`);
 
-    if (text?.toLowerCase().includes("emas")) {
-      try {
-        const res = await fetch("https://api.treasury.id/api/v1/antigrvty/gold/rate", {
-          method: "POST"
-        });
-        const data = await res.json();
-
-        const buy = data?.data?.price?.buy ?? "-";
-        const sell = data?.data?.price?.sell ?? "-";
-
-        await sock.sendMessage(from, {
-          text: `📊 Harga Emas Treasury:\n\n💰 Buy: Rp ${buy}/gram\n💸 Sell: Rp ${sell}/gram`
-        });
-      } catch (e) {
-        await sock.sendMessage(from, { text: "⚠️ Gagal ambil data emas." });
-      }
+    if (text && text.toLowerCase() === "emas") {
+      const harga = await getHargaEmas();
+      await sock.sendMessage(from, {
+        text: `📊 Harga Emas Treasury:\n💰 Buy: Rp ${harga.buy}/gram\n💸 Sell: Rp ${harga.sell}/gram`
+      });
     }
   });
+
+  console.log(`🌐 Healthcheck server listen on :${PORT}`);
+  app.get("/", (req, res) => res.send("Instance is healthy. All health checks are passing."));
+  app.listen(PORT, () => console.log("✅ Bot WhatsApp siap!"));
 }
 
-// healthcheck server (agar Koyeb/Vercel tidak matikan container)
-app.get("/", (req, res) => {
-  res.send("Bot WhatsApp Baileys aktif 🚀");
-});
-
-app.listen(PORT, () => {
-  console.log(`🌐 Healthcheck server listen on :${PORT}`);
-  startBot();
-});
+startBot();
