@@ -1,105 +1,85 @@
 import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
-import express from "express";
-import qrcode from "qrcode";
-import fetch from "node-fetch";
+import P from "pino";
+import fs from "fs";
+import http from "http";
 
-const app = express();
-const PORT = process.env.PORT || 8000;
+// ======= CONFIG LOG =======
+// Semua log ditulis ke file logs.txt
+const LOG_FILE = "logs.txt";
+const logger = P({ level: "silent" });
 
-let sock;
-let latestQR = null;
+// Fungsi tulis log ke file
+function writeLog(message) {
+  const time = new Date().toISOString();
+  fs.appendFileSync(LOG_FILE, `[${time}] ${message}\n`);
+}
 
-// Fungsi buat koneksi ke WhatsApp
-async function connectToWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState("auth");
+// Auto hapus log setiap 1 jam (3600000 ms)
+setInterval(() => {
+  fs.writeFileSync(LOG_FILE, ""); // kosongkan file
+  console.log("🧹 Log dihapus otomatis");
+}, 60 * 60 * 1000);
 
-  sock = makeWASocket({
+// ======= WHATSAPP BOT =======
+async function startSock() {
+  const { state, saveCreds } = await useMultiFileAuthState("auth_info");
+  const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true, // masih tampil QR di terminal
-    browser: ["Ubuntu", "Chrome", "22.04.4"],
+    printQRInTerminal: true,
+    logger
   });
 
-  // QR code handler
-  sock.ev.on("connection.update", ({ qr, connection, lastDisconnect }) => {
-    if (qr) {
-      latestQR = qr; // simpan QR terbaru
-      console.log("📱 Scan QR ini atau buka /qr di browser");
-    }
+  sock.ev.on("connection.update", (update) => {
+    const { connection, lastDisconnect } = update;
     if (connection === "close") {
-      const reason = lastDisconnect?.error?.output?.statusCode;
-      console.log("❌ Koneksi terputus. Alasan:", reason);
-      console.log("🔄 Mengulang koneksi dalam 20 detik...");
-      setTimeout(() => connectToWhatsApp(), 20000);
+      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+      if (shouldReconnect) {
+        console.log("🔄 Reconnect dalam 20 detik...");
+        setTimeout(startSock, 20000);
+      } else {
+        console.log("❌ Logout, hapus folder auth_info untuk scan ulang.");
+      }
     } else if (connection === "open") {
       console.log("✅ Bot WhatsApp siap!");
+      writeLog("Bot terhubung ke WhatsApp");
     }
   });
 
-  sock.ev.on("creds.update", saveCreds);
-
-  // Listener pesan masuk
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
     if (!msg.message || msg.key.fromMe) return;
 
     const from = msg.key.remoteJid;
-    const text =
-      msg.message.conversation ||
-      msg.message.extendedTextMessage?.text ||
-      "";
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
 
-    console.log("📨 Pesan dari", from, "| isi =", text);
+    writeLog(`📨 from=${from} | text="${text}"`);
 
     if (text.toLowerCase().includes("emas")) {
       try {
-        // ambil harga emas realtime
         const res = await fetch("https://api.treasury.id/api/v1/antigrvty/gold/rate", {
           method: "POST",
+          headers: { "Content-Type": "application/json" }
         });
         const data = await res.json();
-
-        if (data && data.data) {
-          const buy = data.data.buy_price.toLocaleString("id-ID");
-          const sell = data.data.sell_price.toLocaleString("id-ID");
-          const reply = `💰 Harga Emas Treasury\n\n📥 Buy: Rp ${buy}/gram\n📤 Sell: Rp ${sell}/gram`;
-
-          await sock.sendMessage(from, { text: reply });
-          console.log("✅ Balasan terkirim:", reply);
+        if (data?.data) {
+          const buy = data.data[0].buy_price;
+          const sell = data.data[0].sell_price;
+          await sock.sendMessage(from, { text: `📊 Harga Emas:\n\n💰 Buy: Rp ${buy}\n💸 Sell: Rp ${sell}` });
+          writeLog("Balasan harga emas terkirim.");
         }
-      } catch (err) {
-        console.error("❌ Gagal ambil data emas:", err);
-        await sock.sendMessage(from, { text: "⚠️ Gagal ambil harga emas, coba lagi." });
+      } catch (e) {
+        writeLog("❌ Gagal ambil harga emas: " + e.message);
       }
     }
   });
+
+  sock.ev.on("creds.update", saveCreds);
 }
 
-// Jalankan koneksi WA
-connectToWhatsApp();
+// ======= HEALTHCHECK SERVER =======
+http.createServer((_, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("Bot is running\n");
+}).listen(8000, () => console.log("🌐 Healthcheck server listen on :8000"));
 
-// Endpoint untuk lihat QR di browser
-app.get("/qr", async (req, res) => {
-  if (!latestQR) return res.send("✅ Sudah login atau QR belum tersedia");
-  try {
-    const qrImage = await qrcode.toDataURL(latestQR, { scale: 8 });
-    res.send(`
-      <html>
-        <body style="display:flex;justify-content:center;align-items:center;height:100vh;flex-direction:column;">
-          <h2>Scan QR WhatsApp</h2>
-          <img src="${qrImage}" />
-        </body>
-      </html>
-    `);
-  } catch (err) {
-    res.status(500).send("Gagal generate QR");
-  }
-});
-
-// Healthcheck
-app.get("/", (req, res) => {
-  res.send("✅ WhatsApp Bot aktif");
-});
-
-app.listen(PORT, () => {
-  console.log(`🌐 Healthcheck server listen on :${PORT}`);
-});
+startSock();
