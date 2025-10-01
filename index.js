@@ -1,22 +1,50 @@
-// index.js – WhatsApp bot + healthcheck server untuk Koyeb (tanpa executablePath)
-// versi ini menambahkan logging & handler message_create agar pesan dari diri sendiri juga terlihat
+// index.js – WhatsApp bot + healthcheck + QR image endpoint (Koyeb friendly)
+// - QR login tampil di log (ASCII) & di /qr (gambar)
+// - Healthcheck di /  (port 8000)
+// - Command "emas" ambil harga dari Treasury
 
 import pkg from "whatsapp-web.js";
-const { Client, LocalAuth } = pkg;
+const { Client, LocalAuth, MessageMedia } = pkg;
 
-import qrcode from "qrcode-terminal";
+import qrcodeTerminal from "qrcode-terminal";
+import QRCode from "qrcode";
 import express from "express";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-// ---------- Mini HTTP server untuk health check Koyeb ----------
+// ---------------- Mini HTTP server (healthcheck & QR viewer) ----------------
 const app = express();
-app.get("/", (_req, res) => res.send("✅ WA Bot up"));
 const PORT = process.env.PORT || 8000;
+
+// simpan QR terakhir (data URL PNG) untuk halaman /qr
+let lastQrDataUrl = "";
+
+app.get("/", (_req, res) => res.send("✅ WA Bot up"));
+
+app.get("/qr", (_req, res) => {
+  if (!lastQrDataUrl) return res.status(404).send("QR belum tersedia. Tunggu beberapa detik lalu refresh.");
+  res.send(`<!doctype html>
+  <html><head><meta charset="utf-8"><title>WhatsApp Login QR</title></head>
+  <body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif">
+    <div style="text-align:center">
+      <h3>Scan QR untuk login WhatsApp</h3>
+      <img src="${lastQrDataUrl}" alt="QR" style="width:320px;height:320px"/>
+      <p>QR WhatsApp cepat kadaluarsa. Jika gagal, refresh halaman ini.</p>
+    </div>
+  </body></html>`);
+});
+
+app.get("/qr.png", (_req, res) => {
+  if (!lastQrDataUrl) return res.status(404).send("QR belum tersedia.");
+  const b64 = lastQrDataUrl.split(",")[1];
+  res.setHeader("Content-Type", "image/png");
+  res.send(Buffer.from(b64, "base64"));
+});
+
 app.listen(PORT, () => console.log(`🌐 Healthcheck server listen on :${PORT}`));
 
-// ---------- Util & API ----------
+// ---------------- Util & API ----------------
 const rupiah = (n) => "Rp " + new Intl.NumberFormat("id-ID").format(Number(n || 0));
 
 async function getRate() {
@@ -40,7 +68,7 @@ async function getRate() {
   }
 }
 
-function buildMessage(r) {
+function buildRateMsg(r) {
   if (!r) return "⚠️ Tidak bisa mengambil harga emas sekarang.";
   return [
     "💰 Harga Emas Treasury (per gram)",
@@ -51,7 +79,7 @@ function buildMessage(r) {
   ].join("\n");
 }
 
-// ---------- WhatsApp client ----------
+// ---------------- WhatsApp client ----------------
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: "./session-wa-emas" }),
   puppeteer: {
@@ -64,43 +92,56 @@ const client = new Client({
       "--no-zygote",
       "--disable-gpu"
     ]
+    // Tidak perlu executablePath karena kita pakai base image Puppeteer di Dockerfile
   }
 });
 
-// ----- lifecycle logs -----
-client.on("qr", (qr) => {
-  console.log("📱 Scan QR ini dengan WhatsApp kamu:");
-  qrcode.generate(qr, { small: true });
+// Lifecycle logs
+client.on("qr", async (qr) => {
+  console.log("📱 Scan QR ini dengan WhatsApp kamu (atau buka /qr):");
+  qrcodeTerminal.generate(qr, { small: true });
+  // simpan QR jadi dataURL untuk halaman /qr
+  try {
+    lastQrDataUrl = await QRCode.toDataURL(qr, { margin: 1, width: 320 });
+  } catch (e) {
+    console.error("Gagal buat dataURL QR:", e);
+  }
 });
+
 client.on("authenticated", () => console.log("🔐 Authenticated."));
 client.on("auth_failure", (m) => console.error("🔴 Auth failure:", m));
 client.on("ready", () => console.log("✅ Bot WhatsApp siap!"));
 client.on("disconnected", (r) => console.error("🔌 Disconnected:", r));
 
-// ----- pesan dari orang lain -----
+// Pesan dari orang lain
 client.on("message", async (msg) => {
-  const text = (msg.body || "").trim().toLowerCase();
-  console.log(`📨 message from ${msg.from} | fromMe=${msg.fromMe} | text="${text}"`);
+  const textRaw = (msg.body || "");
+  const text = textRaw.trim();
+  const lower = text.toLowerCase();
+  console.log(`📨 from=${msg.from} | fromMe=${msg.fromMe} | text="${text}"`);
 
-  if (text === "emas" || text === "/emas") {
+  if (lower === "emas" || lower === "/emas") {
     const rate = await getRate();
-    await msg.reply(buildMessage(rate));
+    await msg.reply(buildRateMsg(rate));
     return;
   }
-  if (text === "help" || text === "/start") {
-    await msg.reply("Ketik *emas* untuk cek harga emas terbaru.");
+
+  if (lower === "help" || lower === "/start") {
+    await msg.reply("Perintah:\n• emas — harga emas terbaru");
     return;
   }
+
+  // default
+  await msg.reply("Halo! 👋 Ketik *emas* untuk cek harga emas, atau *help* untuk daftar perintah.");
 });
 
-// ----- pesan yang kamu kirim sendiri (untuk debug / self-chat) -----
+// Pesan yang kamu kirim sendiri (self-chat) — berguna untuk testing cepat
 client.on("message_create", async (msg) => {
-  if (!msg.fromMe) return; // hanya tangani pesan dari diri sendiri (opsional)
-  const text = (msg.body || "").trim().toLowerCase();
-  console.log(`📝 message_create (fromMe) | to=${msg.to} | text="${text}"`);
-  if (text === "emas" || text === "/emas") {
+  if (!msg.fromMe) return;
+  const t = (msg.body || "").trim().toLowerCase();
+  if (t === "emas" || t === "/emas") {
     const rate = await getRate();
-    await msg.reply(buildMessage(rate));
+    await msg.reply(buildRateMsg(rate));
   }
 });
 
