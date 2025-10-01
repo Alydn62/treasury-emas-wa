@@ -1,93 +1,82 @@
-import makeWASocket, { useMultiFileAuthState } from "@whiskeysockets/baileys"
-import fetch from "node-fetch"
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys"
 import express from "express"
-import qrcode from "qrcode"
+import fetch from "node-fetch"
+import pino from "pino"
 
-const app = express()
-let latestQR = null
+const PORT = process.env.PORT || 8000
 let msgCounter = 0
 
-// ====== QR Page ======
-app.get("/qr", (req, res) => {
-  if (!latestQR) {
-    return res.send("📭 QR belum tersedia, tunggu koneksi WA...")
-  }
-  qrcode.toDataURL(latestQR, (err, url) => {
-    if (err) return res.send("❌ Error generate QR")
-    res.send(`
-      <h3>Scan QR dengan WhatsApp</h3>
-      <img src="${url}" style="width:300px"/>
-    `)
-  })
-})
-
-app.listen(8000, () => {
-  console.log("🌐 Healthcheck server listen on :8000")
-})
-
-// ====== Ambil Harga Treasury ======
+// Fungsi ambil harga emas dari API Treasury
 async function getGoldPrice() {
   try {
-    const res = await fetch("https://api.treasury.id/api/v1/antigrvty/gold/rate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" }
-    })
+    const res = await fetch("https://api.treasury.id/api/v1/antigrvty/gold/rate", { method: "POST" })
     const json = await res.json()
-    if (json?.data) {
-      const { buying_rate, selling_rate, updated_at } = json.data
-      return `Harga Treasury 📊 :\nBuy : Rp ${buying_rate.toLocaleString("id-ID")}\nSel : Rp ${selling_rate.toLocaleString("id-ID")}\nJam : ${updated_at}`
+    if (json?.meta?.code === 200) {
+      const data = json.data
+      return `Harga Treasury 📊 :
+Buy : Rp ${data.buying_rate.toLocaleString("id-ID")}
+Sel : Rp ${data.selling_rate.toLocaleString("id-ID")}
+Jam : ${data.updated_at}`
     } else {
-      return "❌ Data harga emas tidak tersedia."
+      return "❌ Gagal ambil harga emas"
     }
-  } catch (err) {
-    console.error("API Error:", err)
+  } catch (e) {
+    console.error("❌ Error fetch API:", e)
     return "❌ Gagal ambil harga emas"
   }
 }
 
-// ====== Mulai Bot ======
 async function startBot() {
-  const { state, saveCreds } = await useMultiFileAuthState("session")
-
+  const { state, saveCreds } = await useMultiFileAuthState("auth")
   const sock = makeWASocket({
+    printQRInTerminal: false,
     auth: state,
+    logger: pino({ level: "silent" }),
     browser: ["Ubuntu", "Chrome", "22.04.4"],
   })
 
-  sock.ev.on("creds.update", saveCreds)
-
+  // QR ditampilkan di /qr
   sock.ev.on("connection.update", (update) => {
-    const { qr, connection } = update
+    const { connection, lastDisconnect, qr } = update
     if (qr) {
       latestQR = qr
       console.log("📲 QR diterima, buka /qr untuk scan")
     }
-    if (connection === "open") {
+    if (connection === "close") {
+      const shouldReconnect =
+        lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut
+      console.log("❌ Koneksi terputus,", shouldReconnect ? "reconnect..." : "logout.")
+      if (shouldReconnect) startBot()
+    } else if (connection === "open") {
       console.log("✅ Bot WhatsApp siap!")
-    } else if (connection === "close") {
-      console.log("❌ Koneksi terputus, mencoba reconnect...")
-      startBot()
     }
   })
 
-  // ====== Listener Pesan Masuk ======
+  sock.ev.on("creds.update", saveCreds)
+
+  // Handler pesan masuk
   sock.ev.on("messages.upsert", async (m) => {
     try {
       const msg = m.messages[0]
       if (!msg.message) return
 
+      // skip pesan dari diri sendiri
+      if (msg.key.fromMe) return
+
       const sender = msg.key.remoteJid
-      const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").toLowerCase()
+      const text =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        ""
 
       console.log("📨 Pesan masuk dari", sender, ":", text)
 
-      // Hanya balas sekali per pesan
-      if (text.includes("emas")) {
+      if (text.toLowerCase().includes("emas")) {
         const reply = await getGoldPrice()
         await sock.sendMessage(sender, { text: reply })
       }
 
-      // Clear log tiap 100 pesan
+      // log reset setiap 100 pesan
       msgCounter++
       if (msgCounter >= 100) {
         console.clear()
@@ -100,4 +89,19 @@ async function startBot() {
   })
 }
 
+// ====== HTTP Server untuk QR Scan ======
+let latestQR = null
+const app = express()
+app.get("/qr", (req, res) => {
+  if (latestQR) {
+    res.send(`<pre>${latestQR}</pre>`)
+  } else {
+    res.send("Bot is running")
+  }
+})
+app.listen(PORT, () => {
+  console.log(`🌐 Healthcheck server listen on :${PORT}`)
+})
+
+// Start bot
 startBot()
