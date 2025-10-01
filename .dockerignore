@@ -1,5 +1,6 @@
+# .dockerignore
 node_modules
-npm-debug.log*
-.DS_Store
 .env
 session-wa-emas
+npm-debug.log*
+.DS_Store
