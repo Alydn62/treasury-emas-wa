@@ -1,85 +1,103 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
-import P from "pino";
-import fs from "fs";
-import http from "http";
+import makeWASocket, { useMultiFileAuthState } from "@whiskeysockets/baileys"
+import fetch from "node-fetch"
+import express from "express"
+import qrcode from "qrcode"
 
-// ======= CONFIG LOG =======
-// Semua log ditulis ke file logs.txt
-const LOG_FILE = "logs.txt";
-const logger = P({ level: "silent" });
+const app = express()
+let latestQR = null
+let msgCounter = 0
 
-// Fungsi tulis log ke file
-function writeLog(message) {
-  const time = new Date().toISOString();
-  fs.appendFileSync(LOG_FILE, `[${time}] ${message}\n`);
+// ====== QR Page ======
+app.get("/qr", (req, res) => {
+  if (!latestQR) {
+    return res.send("📭 QR belum tersedia, tunggu koneksi WA...")
+  }
+  qrcode.toDataURL(latestQR, (err, url) => {
+    if (err) return res.send("❌ Error generate QR")
+    res.send(`
+      <h3>Scan QR dengan WhatsApp</h3>
+      <img src="${url}" style="width:300px"/>
+    `)
+  })
+})
+
+app.listen(8000, () => {
+  console.log("🌐 Healthcheck server listen on :8000")
+})
+
+// ====== Ambil Harga Treasury ======
+async function getGoldPrice() {
+  try {
+    const res = await fetch("https://api.treasury.id/api/v1/antigrvty/gold/rate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    })
+    const json = await res.json()
+    if (json?.data) {
+      const { buying_rate, selling_rate, updated_at } = json.data
+      return `Harga Treasury 📊 :\nBuy : Rp ${buying_rate.toLocaleString("id-ID")}\nSel : Rp ${selling_rate.toLocaleString("id-ID")}\nJam : ${updated_at}`
+    } else {
+      return "❌ Data harga emas tidak tersedia."
+    }
+  } catch (err) {
+    console.error("API Error:", err)
+    return "❌ Gagal ambil harga emas"
+  }
 }
 
-// Auto hapus log setiap 1 jam (3600000 ms)
-setInterval(() => {
-  fs.writeFileSync(LOG_FILE, ""); // kosongkan file
-  console.log("🧹 Log dihapus otomatis");
-}, 60 * 60 * 1000);
+// ====== Mulai Bot ======
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState("session")
 
-// ======= WHATSAPP BOT =======
-async function startSock() {
-  const { state, saveCreds } = await useMultiFileAuthState("auth_info");
   const sock = makeWASocket({
     auth: state,
-    printQRInTerminal: true,
-    logger
-  });
+    browser: ["Ubuntu", "Chrome", "22.04.4"],
+  })
+
+  sock.ev.on("creds.update", saveCreds)
 
   sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect } = update;
-    if (connection === "close") {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      if (shouldReconnect) {
-        console.log("🔄 Reconnect dalam 20 detik...");
-        setTimeout(startSock, 20000);
-      } else {
-        console.log("❌ Logout, hapus folder auth_info untuk scan ulang.");
-      }
-    } else if (connection === "open") {
-      console.log("✅ Bot WhatsApp siap!");
-      writeLog("Bot terhubung ke WhatsApp");
+    const { qr, connection } = update
+    if (qr) {
+      latestQR = qr
+      console.log("📲 QR diterima, buka /qr untuk scan")
     }
-  });
+    if (connection === "open") {
+      console.log("✅ Bot WhatsApp siap!")
+    } else if (connection === "close") {
+      console.log("❌ Koneksi terputus, mencoba reconnect...")
+      startBot()
+    }
+  })
 
+  // ====== Listener Pesan Masuk ======
   sock.ev.on("messages.upsert", async (m) => {
-    const msg = m.messages[0];
-    if (!msg.message || msg.key.fromMe) return;
+    try {
+      const msg = m.messages[0]
+      if (!msg.message) return
 
-    const from = msg.key.remoteJid;
-    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+      const sender = msg.key.remoteJid
+      const text = (msg.message.conversation || msg.message.extendedTextMessage?.text || "").toLowerCase()
 
-    writeLog(`📨 from=${from} | text="${text}"`);
+      console.log("📨 Pesan masuk dari", sender, ":", text)
 
-    if (text.toLowerCase().includes("emas")) {
-      try {
-        const res = await fetch("https://api.treasury.id/api/v1/antigrvty/gold/rate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" }
-        });
-        const data = await res.json();
-        if (data?.data) {
-          const buy = data.data[0].buy_price;
-          const sell = data.data[0].sell_price;
-          await sock.sendMessage(from, { text: `📊 Harga Emas:\n\n💰 Buy: Rp ${buy}\n💸 Sell: Rp ${sell}` });
-          writeLog("Balasan harga emas terkirim.");
-        }
-      } catch (e) {
-        writeLog("❌ Gagal ambil harga emas: " + e.message);
+      // Hanya balas sekali per pesan
+      if (text.includes("emas")) {
+        const reply = await getGoldPrice()
+        await sock.sendMessage(sender, { text: reply })
       }
-    }
-  });
 
-  sock.ev.on("creds.update", saveCreds);
+      // Clear log tiap 100 pesan
+      msgCounter++
+      if (msgCounter >= 100) {
+        console.clear()
+        msgCounter = 0
+        console.log("🧹 Log dibersihkan")
+      }
+    } catch (err) {
+      console.error("❌ Error handle message:", err)
+    }
+  })
 }
 
-// ======= HEALTHCHECK SERVER =======
-http.createServer((_, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("Bot is running\n");
-}).listen(8000, () => console.log("🌐 Healthcheck server listen on :8000"));
-
-startSock();
+startBot()
