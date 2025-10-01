@@ -2,11 +2,12 @@ import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeys
 import express from "express"
 import fetch from "node-fetch"
 import pino from "pino"
+import qrcode from "qrcode"   // ✅ tambahan
 
 const PORT = process.env.PORT || 8000
 let msgCounter = 0
+let latestQR = null
 
-// Fungsi ambil harga emas dari API Treasury
 async function getGoldPrice() {
   try {
     const res = await fetch("https://api.treasury.id/api/v1/antigrvty/gold/rate", { method: "POST" })
@@ -35,7 +36,6 @@ async function startBot() {
     browser: ["Ubuntu", "Chrome", "22.04.4"],
   })
 
-  // QR ditampilkan di /qr
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update
     if (qr) {
@@ -54,14 +54,11 @@ async function startBot() {
 
   sock.ev.on("creds.update", saveCreds)
 
-  // Handler pesan masuk
   sock.ev.on("messages.upsert", async (m) => {
     try {
       const msg = m.messages[0]
       if (!msg.message) return
-
-      // skip pesan dari diri sendiri
-      if (msg.key.fromMe) return
+      if (msg.key.fromMe) return // skip pesan dari diri sendiri
 
       const sender = msg.key.remoteJid
       const text =
@@ -76,7 +73,6 @@ async function startBot() {
         await sock.sendMessage(sender, { text: reply })
       }
 
-      // log reset setiap 100 pesan
       msgCounter++
       if (msgCounter >= 100) {
         console.clear()
@@ -89,19 +85,23 @@ async function startBot() {
   })
 }
 
-// ====== HTTP Server untuk QR Scan ======
-let latestQR = null
+// HTTP server untuk QR
 const app = express()
-app.get("/qr", (req, res) => {
+app.get("/qr", async (req, res) => {
   if (latestQR) {
-    res.send(`<pre>${latestQR}</pre>`)
+    try {
+      const qrImage = await qrcode.toDataURL(latestQR)
+      res.send(`<img src="${qrImage}" />`)
+    } catch (e) {
+      res.send("❌ Gagal generate QR")
+    }
   } else {
     res.send("Bot is running")
   }
 })
+
 app.listen(PORT, () => {
   console.log(`🌐 Healthcheck server listen on :${PORT}`)
 })
 
-// Start bot
 startBot()
