@@ -1,6 +1,5 @@
-# .gitignore
 node_modules
 .env
-session-wa-emas/
 npm-debug.log*
 .DS_Store
+baileys-session/
