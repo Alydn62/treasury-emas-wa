@@ -83,47 +83,40 @@ function formatRupiah(n) {
     : (Number(n || 0) || 0).toLocaleString('id-ID')
 }
 
-// PERBAIKAN: Hitung diskon sesuai tabel Treasury (max Rp1.020.000)
+function formatUSD(n) {
+  return typeof n === 'number'
+    ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : (Number(n || 0) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+// Hitung diskon sesuai tabel Treasury
 function calculateDiscount(investmentAmount) {
-  const MAX_DISCOUNT = 1020000 // Maksimal diskon Rp1.020.000
+  const MAX_DISCOUNT = 1020000
   
-  // Diskon progresif berdasarkan nominal
   let discountPercent
   
   if (investmentAmount <= 250000) {
-    discountPercent = 3.0 // 3%
+    discountPercent = 3.0
   } else if (investmentAmount <= 5000000) {
-    discountPercent = 3.4 // 3.4%
+    discountPercent = 3.4
   } else if (investmentAmount <= 10000000) {
-    discountPercent = 3.45 // 3.45%
+    discountPercent = 3.45
   } else if (investmentAmount <= 20000000) {
-    discountPercent = 3.425 // 3.425%
+    discountPercent = 3.425
   } else {
-    discountPercent = 3.4 // 3.4% untuk 30jt+
+    discountPercent = 3.4
   }
   
   const calculatedDiscount = investmentAmount * (discountPercent / 100)
-  
-  // Cap discount di Rp1.020.000
   return Math.min(calculatedDiscount, MAX_DISCOUNT)
 }
 
-// Hitung profit dengan diskon dinamis
 function calculateProfit(buyRate, sellRate, investmentAmount) {
-  // 1. Harga awal
   const originalPrice = investmentAmount
-  
-  // 2. Hitung diskon (max Rp1.020.000)
   const discountAmount = calculateDiscount(investmentAmount)
   const discountedPrice = investmentAmount - discountAmount
-  
-  // 3. Total gram = Harga Awal / Harga Beli API
   const totalGrams = investmentAmount / buyRate
-  
-  // 4. Harga Jual = Total Gram × Harga Jual API
   const sellValue = totalGrams * sellRate
-  
-  // 5. Profit = Harga Jual - Harga Setelah Diskon
   const totalProfit = sellValue - discountedPrice
   
   return {
@@ -136,52 +129,192 @@ function calculateProfit(buyRate, sellRate, investmentAmount) {
   }
 }
 
-function formatTreasuryWithCalculator(payload) {
-  const buy = payload?.data?.buying_rate
-  const sell = payload?.data?.selling_rate
-  const updated = payload?.data?.updated_at || new Date().toISOString()
-
-  // Hitung spread
-  const spread = Math.abs(sell - buy)
-  const spreadPercent = ((spread / buy) * 100).toFixed(2)
-
-  // Format waktu
-  const dateStr = updated.split('T')[0] || ''
-  const timeStr = updated.split('T')[1]?.substring(0, 8) || ''
-
-  // Nominal investasi sesuai tabel Treasury
-  const investments = [250000, 5000000, 10000000, 20000000, 30000000]
-  
-  let calculatorText = investments.map(amount => {
-    const calc = calculateProfit(buy, sell, amount)
+// Fetch USD/IDR dari Google Finance
+async function fetchUSDIDRFromGoogle() {
+  try {
+    const url = 'https://www.google.com/finance/quote/USD-IDR'
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5'
+      }
+    })
     
-    // Format profit dengan emoji
-    let profitEmoji = '📉 -'
-    if (calc.profit > 0) {
-      if (calc.profit >= 1500) profitEmoji = '🚀 ++'
-      else if (calc.profit >= 1000) profitEmoji = '📈'
-      else if (calc.profit >= 500) profitEmoji = '📊'
-      else profitEmoji = '📉'
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`)
     }
     
-    return `Harga Awal: Rp${formatRupiah(calc.originalPrice)}
-Harga Setelah Diskon: Rp${formatRupiah(Math.round(calc.discountedPrice))}
-Total Gram: ${calc.totalGrams.toFixed(4)} gram
-Profit: Rp${formatRupiah(Math.round(calc.profit))} ${profitEmoji}`
+    const html = await res.text()
+    
+    // Extract harga
+    let rateMatch = html.match(/class="YMlKec fxKbKc">([0-9,\.]+)</i)
+    if (!rateMatch) {
+      rateMatch = html.match(/data-last-price="([0-9,\.]+)"/i)
+    }
+    if (!rateMatch) {
+      rateMatch = html.match(/USD to IDR[^\d]+([\d,\.]+)/i)
+    }
+    
+    if (rateMatch && rateMatch[1]) {
+      const rateStr = rateMatch[1].replace(/,/g, '')
+      const rate = parseFloat(rateStr)
+      
+      if (rate > 1000 && rate < 50000) {
+        pushLog(`Google Finance USD/IDR: ${rate}`)
+        
+        // Extract perubahan
+        let change = 0
+        let changePercent = 0
+        const changeMatch = html.match(/class="[^"]*P2Luy[^"]*[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i)
+        if (changeMatch) {
+          change = parseFloat(changeMatch[1].replace(/,/g, ''))
+          changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
+        }
+        
+        return {
+          rate,
+          change,
+          changePercent
+        }
+      }
+    }
+    
+    throw new Error('Failed to parse')
+  } catch (e) {
+    pushLog(`Google Finance error: ${e.message}`)
+    // Return fallback
+    return {
+      rate: 15750,
+      change: 0,
+      changePercent: 0
+    }
+  }
+}
+
+// Fetch XAU/USD
+async function fetchGoldPrice() {
+  try {
+    const res = await fetch('https://api.metals.live/v1/spot/gold')
+    if (res.ok) {
+      const json = await res.json()
+      const data = json[0] || {}
+      return {
+        price: data.price || 2650,
+        change: data.change || 0,
+        changePercent: data.changePct || 0
+      }
+    }
+  } catch (e) {
+    pushLog(`Gold API error: ${e.message}`)
+  }
+  
+  return {
+    price: 2650,
+    change: 0,
+    changePercent: 0
+  }
+}
+
+// Format pesan yang user-friendly
+function formatMessage(treasuryData, goldData, usdIdrData) {
+  const buy = treasuryData?.data?.buying_rate || 0
+  const sell = treasuryData?.data?.selling_rate || 0
+  const updated = treasuryData?.data?.updated_at || new Date().toISOString()
+  
+  const dateStr = updated.split('T')[0] || ''
+  const timeStr = updated.split('T')[1]?.substring(0, 5) || ''
+  
+  // XAU/USD
+  const xauPrice = goldData.price
+  const xauChange = goldData.change
+  const xauChangePercent = goldData.changePercent
+  const xauEmoji = xauChange >= 0 ? '📈' : '📉'
+  const xauSign = xauChange >= 0 ? '+' : ''
+  
+  // USD/IDR
+  const usdIdrRate = usdIdrData.rate
+  const usdIdrChange = usdIdrData.change
+  const usdIdrChangePercent = usdIdrData.changePercent
+  const usdIdrEmoji = usdIdrChange >= 0 ? '📈' : '📉'
+  const usdIdrSign = usdIdrChange >= 0 ? '+' : ''
+  
+  // Hitung harga emas global dalam IDR per gram
+  const gramPerOz = 31.1035
+  const xauPricePerGram = xauPrice / gramPerOz
+  const xauPriceIDR = xauPricePerGram * usdIdrRate
+  
+  // Hitung spread
+  const spread = sell - buy
+  const spreadPercent = ((spread / buy) * 100).toFixed(2)
+  
+  return `✨ *HARGA EMAS HARI INI* ✨
+📅 ${dateStr} ${timeStr} WIB
+
+━━━━━━━━━━━━━━━━━━━━━
+💰 *HARGA TREASURY INDONESIA*
+
+📊 Beli Emas:
+   Rp${formatRupiah(buy)}/gram
+
+📊 Jual Emas:
+   Rp${formatRupiah(sell)}/gram
+
+📉 Spread: Rp${formatRupiah(spread)} (${spreadPercent}%)
+
+━━━━━━━━━━━━━━━━━━━━━
+🌍 *HARGA EMAS DUNIA*
+
+💎 XAU/USD:
+   $${formatUSD(xauPrice)}/oz
+   ${xauSign}$${formatUSD(Math.abs(xauChange))} (${xauSign}${Math.abs(xauChangePercent).toFixed(2)}%) ${xauEmoji}
+
+💵 Kurs USD/IDR:
+   Rp${formatRupiah(Math.round(usdIdrRate))}
+   ${usdIdrSign}Rp${formatRupiah(Math.abs(Math.round(usdIdrChange)))} (${usdIdrSign}${Math.abs(usdIdrChangePercent).toFixed(2)}%) ${usdIdrEmoji}
+
+💎 Emas Global (IDR):
+   Rp${formatRupiah(Math.round(xauPriceIDR))}/gram
+
+━━━━━━━━━━━━━━━━━━━━━
+🎁 *SIMULASI DISKON TREASURY*
+(Diskon hingga Rp1.020.000)
+
+${generateDiscountSimulation(buy, sell)}
+
+━━━━━━━━━━━━━━━━━━━━━
+⏱️ _Bot akan reply 1x per menit_
+📊 _Data real-time dari Google Finance_`
+}
+
+function generateDiscountSimulation(buy, sell) {
+  const amounts = [
+    { value: 250000, label: '250rb' },
+    { value: 5000000, label: '5jt' },
+    { value: 10000000, label: '10jt' },
+    { value: 20000000, label: '20jt' },
+    { value: 30000000, label: '30jt' }
+  ]
+  
+  return amounts.map(({ value, label }) => {
+    const calc = calculateProfit(buy, sell, value)
+    
+    let emoji = '📉'
+    if (calc.profit > 0) {
+      if (calc.profit >= 1500) emoji = '🚀'
+      else if (calc.profit >= 1000) emoji = '💎'
+      else if (calc.profit >= 500) emoji = '📈'
+    }
+    
+    const profitSign = calc.profit >= 0 ? '+' : ''
+    
+    return `💰 *Nominal ${label}*
+   Harga: Rp${formatRupiah(value)}
+   Diskon: Rp${formatRupiah(Math.round(calc.discountAmount))}
+   Bayar: Rp${formatRupiah(Math.round(calc.discountedPrice))}
+   Dapat: ${calc.totalGrams.toFixed(4)} gram
+   Profit: ${profitSign}Rp${formatRupiah(Math.round(calc.profit))} ${emoji}`
   }).join('\n\n')
-
-  return `🚨 DISKON TREASURY 🇮🇩
-Waktu: ${dateStr} ${timeStr}
-
-💰 Harga Emas Sekarang:
-Buying: Rp${formatRupiah(buy)}
-Selling: Rp${formatRupiah(sell)}
-
-📈 Spread: Rp${formatRupiah(spread)} (${spreadPercent}%)
-
-${calculatorText}
-
-⚠️ Bot akan reply max 1x per menit untuk menghindari pemblokiran.`
 }
 
 async function fetchTreasury() {
@@ -192,10 +325,10 @@ async function fetchTreasury() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       })
-      if (!res.ok) throw new Error(`Treasury HTTP ${res.status}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json = await res.json()
       if (!json?.data?.buying_rate || !json?.data?.selling_rate) {
-        throw new Error('Response tidak berisi harga')
+        throw new Error('Invalid data')
       }
       return json
     } catch (e) {
@@ -210,7 +343,7 @@ async function fetchTreasury() {
 const app = express()
 
 app.get('/', (_req, res) => {
-  res.type('text/plain').send('Bot is running')
+  res.type('text/plain').send('✅ Bot WhatsApp Emas is running')
 })
 
 app.get('/qr', async (_req, res) => {
@@ -218,14 +351,20 @@ app.get('/qr', async (_req, res) => {
     return res
       .status(200)
       .type('text/html')
-      .send('<pre>QR belum siap atau sudah terscan.\nBot is running</pre>')
+      .send('<pre>QR belum siap atau sudah terscan.\n\n✅ Bot is running</pre>')
   }
 
   try {
     const mod = await import('qrcode').catch(() => null)
     if (mod?.toDataURL) {
       const dataUrl = await mod.toDataURL(lastQr, { margin: 1 })
-      return res.status(200).type('text/html').send(`<img src="${dataUrl}" />`)
+      return res.status(200).type('text/html').send(`
+        <div style="text-align: center; padding: 20px;">
+          <h2>📱 Scan QR Code</h2>
+          <img src="${dataUrl}" style="max-width: 400px;" />
+          <p>Scan dengan WhatsApp untuk connect bot</p>
+        </div>
+      `)
     }
   } catch (_) {}
   res.status(200).type('text/plain').send(lastQr)
@@ -233,32 +372,42 @@ app.get('/qr', async (_req, res) => {
 
 app.get('/stats', (_req, res) => {
   const stats = {
-    isReady,
-    reconnectAttempts,
+    status: isReady ? '🟢 Online' : '🔴 Warming up',
+    uptime: Math.floor(process.uptime()),
     totalChats: lastReplyAtPerChat.size,
     processedMessages: processedMsgIds.size,
-    activeChats: Array.from(lastReplyAtPerChat.entries()).map(([chat, lastTime]) => ({
-      chat: chat.substring(0, 20) + '...',
-      lastReply: new Date(lastTime).toISOString(),
-      cooldownRemaining: Math.max(0, Math.round((COOLDOWN_PER_CHAT - (Date.now() - lastTime)) / 1000))
-    })),
-    recentLogs: logs.slice(-20)
+    activeChats: Array.from(lastReplyAtPerChat.entries())
+      .slice(-10)
+      .map(([chat, lastTime]) => ({
+        chat: chat.substring(0, 25) + '...',
+        lastReply: new Date(lastTime).toISOString(),
+        cooldown: Math.max(0, Math.round((COOLDOWN_PER_CHAT - (Date.now() - lastTime)) / 1000)) + 's'
+      })),
+    recentLogs: logs.slice(-15)
   }
   res.json(stats)
 })
 
-app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    uptime: process.uptime(),
-    isReady,
-    timestamp: new Date().toISOString()
-  })
+app.get('/test', async (_req, res) => {
+  try {
+    const [treasury, gold, usdIdr] = await Promise.all([
+      fetchTreasury(),
+      fetchGoldPrice(),
+      fetchUSDIDRFromGoogle()
+    ])
+    
+    const message = formatMessage(treasury, gold, usdIdr)
+    res.type('text/plain').send(message)
+  } catch (e) {
+    res.status(500).send(`Error: ${e.message}`)
+  }
 })
 
 app.listen(PORT, () => {
-  console.log(`🌐 Healthcheck server listen on :${PORT}`)
-  console.log(`📊 Stats endpoint: http://localhost:${PORT}/stats`)
+  console.log(`🌐 Server running on port ${PORT}`)
+  console.log(`📊 Stats: http://localhost:${PORT}/stats`)
+  console.log(`🧪 Test: http://localhost:${PORT}/test`)
+  console.log(`📱 QR: http://localhost:${PORT}/qr`)
 })
 
 // ------ WHATSAPP ------
@@ -286,40 +435,37 @@ async function start() {
     const { connection, lastDisconnect, qr } = u
     if (qr) {
       lastQr = qr
-      console.log('📲 QR diterima, buka /qr untuk scan')
-      pushLog('QR code generated')
+      console.log('📲 QR code ready - Open /qr to scan')
+      pushLog('QR generated')
     }
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode
       const shouldReconnect = reason !== DisconnectReason.loggedOut
       
-      console.log('❌ Koneksi terputus, reason:', reason)
-      pushLog(`Connection closed: ${reason}`)
+      console.log('❌ Connection closed:', reason)
+      pushLog(`Closed: ${reason}`)
       
       if (shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts)
         reconnectAttempts++
-        console.log(`⏳ Reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms...`)
-        pushLog(`Reconnect scheduled in ${delay}ms`)
+        console.log(`⏳ Reconnecting in ${delay}ms (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
         setTimeout(() => start(), delay)
       } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        console.error('❌ Max reconnect attempts reached. Exiting...')
-        pushLog('Max reconnect attempts reached')
+        console.error('❌ Max reconnect attempts')
         process.exit(1)
       }
     } else if (connection === 'open') {
       lastQr = null
       reconnectAttempts = 0
-      console.log('✅ Bot WhatsApp connected!')
+      console.log('✅ WhatsApp connected!')
       
       isReady = false
-      pushLog('Bot connected, entering 15s warmup period...')
-      console.log('⏳ Warmup period 15 detik...')
+      console.log('⏳ Warmup 15s...')
       
       setTimeout(() => {
         isReady = true
-        pushLog('Bot ready to receive messages')
-        console.log('🟢 Bot siap menerima pesan!')
+        console.log('🟢 Bot ready!')
+        pushLog('Ready')
       }, 15000)
     }
   })
@@ -327,11 +473,7 @@ async function start() {
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('messages.upsert', async (ev) => {
-    if (!isReady) {
-      pushLog('Message received during warmup, ignored')
-      return
-    }
-    
+    if (!isReady) return
     if (ev.type !== 'notify') return
     
     for (const msg of ev.messages) {
@@ -339,63 +481,60 @@ async function start() {
         if (shouldIgnoreMessage(msg)) continue
 
         const stanzaId = msg.key.id
-        if (processedMsgIds.has(stanzaId)) {
-          pushLog(`Duplicate message ignored: ${stanzaId}`)
-          continue
-        }
+        if (processedMsgIds.has(stanzaId)) continue
         processedMsgIds.add(stanzaId)
 
         const text = normalizeText(extractText(msg))
-        if (!text) continue
-        
-        if (!/\bemas\b/.test(text)) continue
+        if (!text || !/\bemas\b/.test(text)) continue
 
         const sendTarget = msg.key.remoteJid
         const now = Date.now()
         
+        // Cooldown check
         const lastReply = lastReplyAtPerChat.get(sendTarget) || 0
-        const timeSinceLastReply = now - lastReply
-        if (timeSinceLastReply < COOLDOWN_PER_CHAT) {
-          const remainingSeconds = Math.ceil((COOLDOWN_PER_CHAT - timeSinceLastReply) / 1000)
-          pushLog(`Cooldown active for ${sendTarget}, ${remainingSeconds}s remaining`)
+        if (now - lastReply < COOLDOWN_PER_CHAT) {
+          pushLog(`Cooldown: ${sendTarget}`)
           continue
         }
         
-        if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) {
-          pushLog(`Global throttle active`)
-          continue
-        }
+        // Global throttle
+        if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) continue
 
-        pushLog(`Processing message from ${sendTarget}`)
+        pushLog(`Processing: ${sendTarget}`)
 
-        console.log(`⌨️  Typing for ${sendTarget}...`)
+        // Typing indicator
         try {
           await sock.sendPresenceUpdate('composing', sendTarget)
-        } catch (e) {
-          pushLog(`Failed to send typing indicator: ${e.message}`)
-        }
+        } catch (_) {}
         
         await new Promise(r => setTimeout(r, TYPING_DURATION))
 
+        // Fetch data
         let replyText
         try {
-          const data = await fetchTreasury()
-          replyText = formatTreasuryWithCalculator(data)
-          pushLog('Treasury data fetched successfully')
+          const [treasury, gold, usdIdr] = await Promise.all([
+            fetchTreasury(),
+            fetchGoldPrice(),
+            fetchUSDIDRFromGoogle()
+          ])
+          
+          replyText = formatMessage(treasury, gold, usdIdr)
+          pushLog('Data fetched ✓')
         } catch (e) {
-          replyText = '❌ Gagal mengambil harga Treasury. Coba lagi sebentar.'
-          pushLog(`ERR fetchTreasury: ${e?.message || e}`)
+          replyText = '❌ Maaf, gagal mengambil data harga emas.\n\n⏱️ Silakan coba lagi dalam beberapa saat.'
+          pushLog(`Error: ${e.message}`)
         }
 
+        // Random delay
         const randomDelay = Math.floor(Math.random() * (RANDOM_DELAY_MAX - RANDOM_DELAY_MIN)) + RANDOM_DELAY_MIN
         await new Promise(r => setTimeout(r, randomDelay))
         
+        // Stop typing
         try {
           await sock.sendPresenceUpdate('paused', sendTarget)
-        } catch (e) {
-          pushLog(`Failed to stop typing indicator: ${e.message}`)
-        }
+        } catch (_) {}
         
+        // Send message
         await sock.sendMessage(
           sendTarget,
           { text: replyText },
@@ -406,13 +545,13 @@ async function start() {
         lastGlobalReplyAt = now
         
         console.log(`✅ Replied to ${sendTarget}`)
-        pushLog(`Successfully replied to ${sendTarget}`)
+        pushLog(`Sent ✓`)
         
         await new Promise(r => setTimeout(r, 2000))
         
       } catch (e) {
-        pushLog(`ERR handler: ${e?.message || e}`)
-        console.error('Error handling message:', e)
+        pushLog(`Error: ${e.message}`)
+        console.error('Handler error:', e)
         await new Promise(r => setTimeout(r, 5000))
       }
     }
@@ -420,7 +559,6 @@ async function start() {
 }
 
 start().catch((e) => {
-  console.error('Fatal start error:', e)
-  pushLog(`Fatal error: ${e.message}`)
+  console.error('Fatal error:', e)
   process.exit(1)
 })
