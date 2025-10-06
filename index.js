@@ -86,9 +86,17 @@ function formatTreasuryText(payload) {
       ? n.toLocaleString('id-ID')
       : (Number(n || 0) || 0).toLocaleString('id-ID')
 
+  // Hitung spread
+  const spread = Math.abs(sell - buy)
+  const spreadPercent = ((spread / buy) * 100).toFixed(2)
+
   return `📊 Harga Treasury 🇮🇩:
-💰 Buy: Rp ${fmt(buy)}
+
+💰 Buy : Rp ${fmt(buy)}
 💸 Sell: Rp ${fmt(sell)}
+
+📈 Spread: Rp ${fmt(spread)} (${spreadPercent}%)
+
 ⏰ Update: ${updated}
 
 ⚠️ Bot ini memiliki limit penggunaan untuk menghindari pemblokiran.`
