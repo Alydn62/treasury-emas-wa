@@ -13,17 +13,17 @@ const PORT = process.env.PORT || 8000
 const TREASURY_URL = process.env.TREASURY_URL ||
   'https://api.treasury.id/api/v1/antigrvty/gold/rate'
 
-// Anti-spam settings (DOUBLE ANTI BLOKIR)
-const COOLDOWN_PER_CHAT = 60000 // 1 menit per chat (sesuai permintaan)
-const GLOBAL_THROTTLE = 3000 // 3 detik antar pesan global
-const TYPING_DURATION = 6000 // 6 detik typing indicator
-const RANDOM_DELAY_MIN = 2000 // Min 2 detik
-const RANDOM_DELAY_MAX = 5000 // Max 5 detik
+// Anti-spam settings
+const COOLDOWN_PER_CHAT = 60000
+const GLOBAL_THROTTLE = 3000
+const TYPING_DURATION = 6000
+const RANDOM_DELAY_MIN = 2000
+const RANDOM_DELAY_MAX = 5000
 
 // Reconnect backoff
 let reconnectAttempts = 0
 const MAX_RECONNECT_ATTEMPTS = 5
-const BASE_RECONNECT_DELAY = 5000 // 5 detik
+const BASE_RECONNECT_DELAY = 5000
 
 // ------ STATE ------
 let lastQr = null
@@ -31,15 +31,13 @@ const logs = []
 const processedMsgIds = new Set()
 const lastReplyAtPerChat = new Map()
 let lastGlobalReplyAt = 0
-let isReady = false // Flag untuk warmup period
+let isReady = false
 
-// Batasi log max 100
 function pushLog(s) {
   logs.push(`${new Date().toISOString()} ${s}`)
   if (logs.length > 100) logs.splice(0, logs.length - 100)
 }
 
-// Cleanup message IDs setiap 30 menit untuk mencegah memory leak
 setInterval(() => {
   if (processedMsgIds.size > 2000) {
     const idsArray = Array.from(processedMsgIds)
@@ -79,28 +77,61 @@ function extractText(m) {
   )
 }
 
-// Format rupiah
 function formatRupiah(n) {
   return typeof n === 'number'
     ? n.toLocaleString('id-ID')
     : (Number(n || 0) || 0).toLocaleString('id-ID')
 }
 
-// Hitung profit dengan diskon Treasury
-function calculateProfit(buyRate, sellRate, investmentAmount) {
-  // Asumsi diskon Treasury 3.5%
-  const DISCOUNT_PERCENT = 3.5
+// PERBAIKAN: Hitung diskon sesuai tabel Treasury (max Rp1.020.000)
+function calculateDiscount(investmentAmount) {
+  const MAX_DISCOUNT = 1020000 // Maksimal diskon Rp1.020.000
   
+  // Diskon progresif berdasarkan nominal
+  let discountPercent
+  
+  if (investmentAmount <= 250000) {
+    discountPercent = 3.0 // 3%
+  } else if (investmentAmount <= 5000000) {
+    discountPercent = 3.4 // 3.4%
+  } else if (investmentAmount <= 10000000) {
+    discountPercent = 3.45 // 3.45%
+  } else if (investmentAmount <= 20000000) {
+    discountPercent = 3.425 // 3.425%
+  } else {
+    discountPercent = 3.4 // 3.4% untuk 30jt+
+  }
+  
+  const calculatedDiscount = investmentAmount * (discountPercent / 100)
+  
+  // Cap discount di Rp1.020.000
+  return Math.min(calculatedDiscount, MAX_DISCOUNT)
+}
+
+// Hitung profit dengan diskon dinamis
+function calculateProfit(buyRate, sellRate, investmentAmount) {
+  // 1. Harga awal
   const originalPrice = investmentAmount
-  const discountedPrice = investmentAmount * (1 - DISCOUNT_PERCENT / 100)
-  const totalGrams = discountedPrice / buyRate
-  const profitPerGram = sellRate - buyRate
-  const totalProfit = totalGrams * profitPerGram
+  
+  // 2. Hitung diskon (max Rp1.020.000)
+  const discountAmount = calculateDiscount(investmentAmount)
+  const discountedPrice = investmentAmount - discountAmount
+  
+  // 3. Total gram = Harga Awal / Harga Beli API
+  const totalGrams = investmentAmount / buyRate
+  
+  // 4. Harga Jual = Total Gram × Harga Jual API
+  const sellValue = totalGrams * sellRate
+  
+  // 5. Profit = Harga Jual - Harga Setelah Diskon
+  const totalProfit = sellValue - discountedPrice
   
   return {
     originalPrice,
+    discountAmount,
     discountedPrice,
     totalGrams,
+    sellValue,
     profit: totalProfit
   }
 }
@@ -114,18 +145,23 @@ function formatTreasuryWithCalculator(payload) {
   const spread = Math.abs(sell - buy)
   const spreadPercent = ((spread / buy) * 100).toFixed(2)
 
-  // Nominal investasi untuk kalkulator
+  // Format waktu
+  const dateStr = updated.split('T')[0] || ''
+  const timeStr = updated.split('T')[1]?.substring(0, 8) || ''
+
+  // Nominal investasi sesuai tabel Treasury
   const investments = [250000, 5000000, 10000000, 20000000, 30000000]
   
   let calculatorText = investments.map(amount => {
     const calc = calculateProfit(buy, sell, amount)
     
-    // Format profit dengan emoji sesuai nilainya
-    let profitEmoji = '📉'
+    // Format profit dengan emoji
+    let profitEmoji = '📉 -'
     if (calc.profit > 0) {
       if (calc.profit >= 1500) profitEmoji = '🚀 ++'
       else if (calc.profit >= 1000) profitEmoji = '📈'
-      else profitEmoji = '📊'
+      else if (calc.profit >= 500) profitEmoji = '📊'
+      else profitEmoji = '📉'
     }
     
     return `Harga Awal: Rp${formatRupiah(calc.originalPrice)}
@@ -135,7 +171,7 @@ Profit: Rp${formatRupiah(Math.round(calc.profit))} ${profitEmoji}`
   }).join('\n\n')
 
   return `🚨 DISKON TREASURY 🇮🇩
-Waktu: ${updated.split('T')[0]} - ${updated.split('T')[1]?.substring(0, 8) || ''}
+Waktu: ${dateStr} ${timeStr}
 
 💰 Harga Emas Sekarang:
 Buying: Rp${formatRupiah(buy)}
@@ -238,7 +274,7 @@ async function start() {
     printQRInTerminal: false,
     auth: state,
     browser: Browsers.ubuntu('Chrome'),
-    markOnlineOnConnect: false, // Jangan langsung online
+    markOnlineOnConnect: false,
     syncFullHistory: false,
     defaultQueryTimeoutMs: 60000,
     getMessage: async (key) => {
@@ -261,7 +297,6 @@ async function start() {
       pushLog(`Connection closed: ${reason}`)
       
       if (shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        // EXPONENTIAL BACKOFF untuk reconnect
         const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts)
         reconnectAttempts++
         console.log(`⏳ Reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms...`)
@@ -274,10 +309,9 @@ async function start() {
       }
     } else if (connection === 'open') {
       lastQr = null
-      reconnectAttempts = 0 // Reset counter setelah berhasil connect
+      reconnectAttempts = 0
       console.log('✅ Bot WhatsApp connected!')
       
-      // WARMUP PERIOD: tunggu 15 detik sebelum mulai terima pesan
       isReady = false
       pushLog('Bot connected, entering 15s warmup period...')
       console.log('⏳ Warmup period 15 detik...')
@@ -286,14 +320,13 @@ async function start() {
         isReady = true
         pushLog('Bot ready to receive messages')
         console.log('🟢 Bot siap menerima pesan!')
-      }, 15000) // 15 detik warmup untuk keamanan ekstra
+      }, 15000)
     }
   })
 
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('messages.upsert', async (ev) => {
-    // SKIP jika belum ready (warmup period)
     if (!isReady) {
       pushLog('Message received during warmup, ignored')
       return
@@ -303,10 +336,8 @@ async function start() {
     
     for (const msg of ev.messages) {
       try {
-        // Filter awal
         if (shouldIgnoreMessage(msg)) continue
 
-        // Anti-duplikat berdasar stanzaId
         const stanzaId = msg.key.id
         if (processedMsgIds.has(stanzaId)) {
           pushLog(`Duplicate message ignored: ${stanzaId}`)
@@ -317,22 +348,19 @@ async function start() {
         const text = normalizeText(extractText(msg))
         if (!text) continue
         
-        // Trigger kata "emas"
         if (!/\bemas\b/.test(text)) continue
 
         const sendTarget = msg.key.remoteJid
         const now = Date.now()
         
-        // COOLDOWN PER CHAT: 1 menit (sesuai permintaan)
         const lastReply = lastReplyAtPerChat.get(sendTarget) || 0
         const timeSinceLastReply = now - lastReply
         if (timeSinceLastReply < COOLDOWN_PER_CHAT) {
           const remainingSeconds = Math.ceil((COOLDOWN_PER_CHAT - timeSinceLastReply) / 1000)
           pushLog(`Cooldown active for ${sendTarget}, ${remainingSeconds}s remaining`)
-          continue // SILENT - tidak kirim notif
+          continue
         }
         
-        // GLOBAL THROTTLE: 3 detik antar pesan
         if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) {
           pushLog(`Global throttle active`)
           continue
@@ -340,7 +368,6 @@ async function start() {
 
         pushLog(`Processing message from ${sendTarget}`)
 
-        // TYPING INDICATOR: 6 detik (sesuai permintaan)
         console.log(`⌨️  Typing for ${sendTarget}...`)
         try {
           await sock.sendPresenceUpdate('composing', sendTarget)
@@ -350,7 +377,6 @@ async function start() {
         
         await new Promise(r => setTimeout(r, TYPING_DURATION))
 
-        // Ambil data Treasury
         let replyText
         try {
           const data = await fetchTreasury()
@@ -361,45 +387,38 @@ async function start() {
           pushLog(`ERR fetchTreasury: ${e?.message || e}`)
         }
 
-        // RANDOM DELAY: 2-5 detik untuk variasi
         const randomDelay = Math.floor(Math.random() * (RANDOM_DELAY_MAX - RANDOM_DELAY_MIN)) + RANDOM_DELAY_MIN
         await new Promise(r => setTimeout(r, randomDelay))
         
-        // Stop typing indicator
         try {
           await sock.sendPresenceUpdate('paused', sendTarget)
         } catch (e) {
           pushLog(`Failed to stop typing indicator: ${e.message}`)
         }
         
-        // Kirim pesan
         await sock.sendMessage(
           sendTarget,
           { text: replyText },
           { quoted: msg }
         )
 
-        // Update timestamp
         lastReplyAtPerChat.set(sendTarget, now)
         lastGlobalReplyAt = now
         
         console.log(`✅ Replied to ${sendTarget}`)
         pushLog(`Successfully replied to ${sendTarget}`)
         
-        // Delay setelah kirim pesan untuk keamanan ekstra
         await new Promise(r => setTimeout(r, 2000))
         
       } catch (e) {
         pushLog(`ERR handler: ${e?.message || e}`)
         console.error('Error handling message:', e)
-        // Delay lebih lama setelah error
         await new Promise(r => setTimeout(r, 5000))
       }
     }
   })
 }
 
-// Start bot
 start().catch((e) => {
   console.error('Fatal start error:', e)
   pushLog(`Fatal error: ${e.message}`)
