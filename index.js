@@ -2,7 +2,8 @@
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
-  useMultiFileAuthState
+  useMultiFileAuthState,
+  Browsers
 } from '@whiskeysockets/baileys'
 import pino from 'pino'
 import express from 'express'
@@ -10,20 +11,42 @@ import express from 'express'
 // ------ CONFIG ------
 const PORT = process.env.PORT || 8000
 const TREASURY_URL = process.env.TREASURY_URL ||
-  'https://api.treasury.id/api/v1/antigrvty/gold/rate' // POST endpoint
+  'https://api.treasury.id/api/v1/antigrvty/gold/rate'
+
+// Anti-spam settings (lebih ketat untuk menghindari block)
+const COOLDOWN_PER_CHAT = 60000 // 60 detik (1 menit) per chat
+const GLOBAL_THROTTLE = 2000 // 2 detik antar pesan global
+const MAX_MESSAGES_PER_HOUR = 20 // Maksimal 20 pesan per jam
+const MAX_MESSAGES_PER_DAY = 100 // Maksimal 100 pesan per hari
 
 // ------ STATE ------
-let lastQr = null                              // untuk /qr
-const logs = []                                // batasi log
-const processedMsgIds = new Set()              // anti-duplikat
-const lastReplyAtPerChat = new Map()           // cooldown per chat
-let lastGlobalReplyAt = 0                      // throttle global
+let lastQr = null
+const logs = []
+const processedMsgIds = new Set()
+const lastReplyAtPerChat = new Map()
+let lastGlobalReplyAt = 0
 
-// batasi log max 100
+// Tracking untuk rate limiting
+const messageCountPerHour = new Map()
+const messageCountPerDay = new Map()
+
+// Batasi log max 100
 function pushLog(s) {
   logs.push(`${new Date().toISOString()} ${s}`)
   if (logs.length > 100) logs.splice(0, logs.length - 100)
 }
+
+// Reset counter setiap jam
+setInterval(() => {
+  messageCountPerHour.clear()
+  pushLog('Hourly message counter reset')
+}, 60 * 60 * 1000)
+
+// Reset counter setiap hari
+setInterval(() => {
+  messageCountPerDay.clear()
+  pushLog('Daily message counter reset')
+}, 24 * 60 * 60 * 1000)
 
 // ------ UTIL ------
 function normalizeText(msg) {
@@ -32,7 +55,6 @@ function normalizeText(msg) {
 }
 
 function shouldIgnoreMessage(m) {
-  // abaikan status, pesan sendiri, dan pesan tanpa text
   if (!m || !m.key) return true
   if (m.key.remoteJid === 'status@broadcast') return true
   if (m.key.fromMe) return true
@@ -64,14 +86,15 @@ function formatTreasuryText(payload) {
       ? n.toLocaleString('id-ID')
       : (Number(n || 0) || 0).toLocaleString('id-ID')
 
-  return `📊 Harga Treasury 🇮🇩 :
-💰 Buy : Rp ${fmt(buy)}
-💸 Sel : Rp ${fmt(sell)}
-⏰ Jam : ${updated}`
+  return `📊 Harga Treasury 🇮🇩:
+💰 Buy: Rp ${fmt(buy)}
+💸 Sell: Rp ${fmt(sell)}
+⏰ Update: ${updated}
+
+⚠️ Bot ini memiliki limit penggunaan untuk menghindari pemblokiran.`
 }
 
 async function fetchTreasury() {
-  // 2x retry sederhana
   let lastErr
   for (let i = 0; i < 2; i++) {
     try {
@@ -93,6 +116,20 @@ async function fetchTreasury() {
   throw lastErr
 }
 
+// Cek apakah sudah melebihi limit
+function isRateLimited(chatId) {
+  const hourCount = messageCountPerHour.get(chatId) || 0
+  const dayCount = messageCountPerDay.get(chatId) || 0
+  
+  return hourCount >= MAX_MESSAGES_PER_HOUR || dayCount >= MAX_MESSAGES_PER_DAY
+}
+
+// Increment counter
+function incrementMessageCount(chatId) {
+  messageCountPerHour.set(chatId, (messageCountPerHour.get(chatId) || 0) + 1)
+  messageCountPerDay.set(chatId, (messageCountPerDay.get(chatId) || 0) + 1)
+}
+
 // ------ EXPRESS ------
 const app = express()
 app.get('/', (_req, res) => {
@@ -100,7 +137,6 @@ app.get('/', (_req, res) => {
 })
 
 app.get('/qr', async (_req, res) => {
-  // tampilkan QR sebagai <img> bila ada; jika tidak ada, info status
   if (!lastQr) {
     return res
       .status(200)
@@ -108,18 +144,15 @@ app.get('/qr', async (_req, res) => {
       .send('<pre>QR belum siap atau sudah terscan.\nBot is running</pre>')
   }
 
-  // coba render <img> pakai data:url (butuh qrcode untuk memperindah)
   try {
-    // optional dep: qrcode
     const mod = await import('qrcode').catch(() => null)
     if (mod?.toDataURL) {
       const dataUrl = await mod.toDataURL(lastQr, { margin: 1 })
       return res.status(200).type('text/html').send(`<img src="${dataUrl}" />`)
     }
   } catch (_) {
-    // abaikan, fallback teks
+    // fallback teks
   }
-  // fallback: tampilkan string QR apa adanya (masih bisa discan via layar lain)
   res.status(200).type('text/plain').send(lastQr)
 })
 
@@ -132,19 +165,21 @@ async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth')
   const { version } = await fetchLatestBaileysVersion()
 
-  const logger = pino({ level: 'info' })
+  const logger = pino({ level: 'silent' }) // Ubah ke 'silent' untuk mengurangi log
 
   const sock = makeWASocket({
     version,
     logger,
-    printQRInTerminal: false, // deprecated; kita handle sendiri via /qr
+    printQRInTerminal: false,
     auth: state,
-    browser: ['Ubuntu', 'Chrome', '22.04.4'],
-    markOnlineOnConnect: false,
-    syncFullHistory: false
+    browser: Browsers.ubuntu('Chrome'), // Gunakan browser yang lebih umum
+    markOnlineOnConnect: true, // Tampilkan online saat connect
+    syncFullHistory: false,
+    getMessage: async (key) => {
+      return { conversation: '' }
+    }
   })
 
-  // connection.update: simpan QR (untuk /qr) & info koneksi
   sock.ev.on('connection.update', async (u) => {
     const { connection, lastDisconnect, qr } = u
     if (qr) {
@@ -153,70 +188,104 @@ async function start() {
     }
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode
-      const isRestart =
-        lastDisconnect?.error?.message?.includes('Stream Errored') ||
-        reason === DisconnectReason.loggedOut
-      console.log('❌ Koneksi terputus, mencoba reconnect...')
-      if (isRestart) setTimeout(() => start(), 1500)
+      const shouldReconnect = reason !== DisconnectReason.loggedOut
+      
+      console.log('❌ Koneksi terputus, reason:', reason)
+      
+      if (shouldReconnect) {
+        // Tunggu lebih lama sebelum reconnect untuk menghindari spam
+        console.log('⏳ Menunggu 5 detik sebelum reconnect...')
+        setTimeout(() => start(), 5000)
+      }
     } else if (connection === 'open') {
       lastQr = null
       console.log('✅ Bot WhatsApp siap!')
+      pushLog('Bot connected successfully')
     }
   })
 
-  // simpan creds
   sock.ev.on('creds.update', saveCreds)
 
-  // handler pesan
   sock.ev.on('messages.upsert', async (ev) => {
     if (ev.type !== 'notify') return
+    
     for (const msg of ev.messages) {
       try {
-        // filter awal
+        // Filter awal
         if (shouldIgnoreMessage(msg)) continue
 
-        // anti-duplikat berdasar stanzaId
+        // Anti-duplikat berdasar stanzaId
         const stanzaId = msg.key.id
         if (processedMsgIds.has(stanzaId)) continue
         processedMsgIds.add(stanzaId)
         if (processedMsgIds.size > 5000) {
-          // ring buffer sederhana
           const first = processedMsgIds.values().next().value
           processedMsgIds.delete(first)
         }
 
         const text = normalizeText(extractText(msg))
-        // trigger kata "emas" (case-insensitive), persis atau mengandung
         if (!text) continue
+        
+        // Trigger kata "emas"
         if (!/\bemas\b/.test(text)) continue
 
-        const sendTarget = msg.key.remoteJid // <<<<<< target yang benar (pengirim/grup)
+        const sendTarget = msg.key.remoteJid
 
-        // anti-spam: cooldown per chat 3 detik + throttle global 300ms
+        // Rate limiting - lebih ketat
         const now = Date.now()
-        if (now - (lastReplyAtPerChat.get(sendTarget) || 0) < 3000) continue
-        if (now - lastGlobalReplyAt < 300) continue
+        
+        // Cek cooldown per chat (10 detik)
+        const lastReply = lastReplyAtPerChat.get(sendTarget) || 0
+        if (now - lastReply < COOLDOWN_PER_CHAT) {
+          pushLog(`Cooldown active for ${sendTarget}`)
+          continue
+        }
+        
+        // Cek global throttle (1 detik)
+        if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) {
+          pushLog(`Global throttle active`)
+          continue
+        }
+        
+        // Cek rate limit per jam dan per hari
+        if (isRateLimited(sendTarget)) {
+          pushLog(`Rate limit exceeded for ${sendTarget}`)
+          await sock.sendMessage(
+            sendTarget,
+            { 
+              text: '⚠️ Maaf, Anda sudah mencapai batas penggunaan bot. Silakan coba lagi nanti untuk menghindari pemblokiran WhatsApp.' 
+            },
+            { quoted: msg }
+          )
+          continue
+        }
 
-        // ambil harga
+        // Ambil harga
         let replyText
         try {
           const data = await fetchTreasury()
           replyText = formatTreasuryText(data)
         } catch (e) {
-          replyText = '❌ Gagal ambil harga Treasury. Coba lagi sebentar.'
+          replyText = '❌ Gagal mengambil harga Treasury. Coba lagi sebentar.'
           pushLog(`ERR fetchTreasury: ${e?.message || e}`)
         }
 
-        // kirim balasan (quote pesan pengguna)
+        // Kirim balasan dengan delay random untuk terlihat lebih natural
+        const randomDelay = Math.floor(Math.random() * 2000) + 1000 // 1-3 detik
+        await new Promise(r => setTimeout(r, randomDelay))
+        
         await sock.sendMessage(
           sendTarget,
           { text: replyText },
           { quoted: msg }
         )
 
-        // update rate-limit
+        // Update counter dan timestamp
+        incrementMessageCount(sendTarget)
         lastReplyAtPerChat.set(sendTarget, now)
         lastGlobalReplyAt = now
+        
+        pushLog(`Replied to ${sendTarget}`)
       } catch (e) {
         pushLog(`ERR handler: ${e?.message || e}`)
       }
