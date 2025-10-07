@@ -21,6 +21,10 @@ const TYPING_DURATION = 6000
 const RANDOM_DELAY_MIN = 2000
 const RANDOM_DELAY_MAX = 5000
 
+// Price monitoring settings - 50 detik untuk hemat CPU
+const PRICE_CHECK_INTERVAL = 50000 // 50 detik
+let lastKnownPrice = null
+
 // Reconnect settings
 let reconnectAttempts = 0
 const MAX_RECONNECT_ATTEMPTS = 10
@@ -37,23 +41,23 @@ let sock = null
 
 // Subscription state
 const subscriptions = new Set()
-let lastBroadcastMinute = -1
 
 function pushLog(s) {
   const logMsg = `${new Date().toISOString()} ${s}`
   logs.push(logMsg)
   console.log(logMsg)
-  if (logs.length > 100) logs.splice(0, logs.length - 100)
+  if (logs.length > 50) logs.splice(0, logs.length - 50)
 }
 
+// Cleanup memory setiap jam
 setInterval(() => {
-  if (processedMsgIds.size > 2000) {
+  if (processedMsgIds.size > 1000) {
     const idsArray = Array.from(processedMsgIds)
-    const toKeep = idsArray.slice(-1000)
+    const toKeep = idsArray.slice(-500)
     processedMsgIds.clear()
     toKeep.forEach(id => processedMsgIds.add(id))
   }
-}, 30 * 60 * 1000)
+}, 60 * 60 * 1000)
 
 // ------ UTIL ------
 function normalizeText(msg) {
@@ -135,167 +139,68 @@ function calculateProfit(buyRate, sellRate, investmentAmount) {
   }
 }
 
-// PERBAIKAN: Fallback API jika Google Finance gagal
 async function fetchUSDIDRFallback() {
   try {
-    console.log('🔄 Trying fallback API: ExchangeRate-API...')
-    const res = await fetch('https://api.exchangerate-api.com/v4/latest/USD')
+    const res = await fetch('https://api.exchangerate-api.com/v4/latest/USD', {
+      signal: AbortSignal.timeout(5000) // 5 detik timeout
+    })
     if (res.ok) {
       const json = await res.json()
       const rate = json.rates?.IDR || 0
       
       if (rate > 1000 && rate < 50000) {
-        console.log(`✅ Fallback API success: ${rate}`)
-        pushLog(`Fallback API: USD/IDR = ${rate}`)
-        return {
-          rate,
-          change: 0,
-          changePercent: 0
-        }
+        return { rate, change: 0, changePercent: 0 }
       }
     }
   } catch (e) {
-    console.error('❌ Fallback API error:', e.message)
+    console.error('Fallback API error:', e.message)
   }
   
-  // Ultimate fallback
-  console.log('⚠️  Using manual fallback')
-  pushLog('Using manual fallback for USD/IDR')
-  return { 
-    rate: 15750, 
-    change: 0, 
-    changePercent: 0 
-  }
+  return { rate: 15750, change: 0, changePercent: 0 }
 }
 
-// PERBAIKAN: Scraping Google Finance dengan multiple patterns
 async function fetchUSDIDRFromGoogle() {
   try {
-    const url = 'https://www.google.com/finance/quote/USD-IDR'
-    const res = await fetch(url, {
+    const res = await fetch('https://www.google.com/finance/quote/USD-IDR', {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Cache-Control': 'max-age=0'
-      }
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      signal: AbortSignal.timeout(5000) // 5 detik timeout
     })
     
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`)
-    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
     
     const html = await res.text()
-    console.log('📄 Google Finance HTML length:', html.length)
     
-    let rateMatch = null
-    
-    // Pattern 1: YMlKec fxKbKc (paling umum)
-    rateMatch = html.match(/class="YMlKec fxKbKc"[^>]*>([0-9,\.]+)<\/div>/i)
-    if (rateMatch) console.log('✓ Pattern 1 matched')
-    
-    // Pattern 2: data-last-price
-    if (!rateMatch) {
-      rateMatch = html.match(/data-last-price="([0-9,\.]+)"/i)
-      if (rateMatch) console.log('✓ Pattern 2 matched')
-    }
-    
-    // Pattern 3: data-source-price
-    if (!rateMatch) {
-      rateMatch = html.match(/data-source-price="([0-9,\.]+)"/i)
-      if (rateMatch) console.log('✓ Pattern 3 matched')
-    }
-    
-    // Pattern 4: Cari angka setelah USD/IDR
-    if (!rateMatch) {
-      rateMatch = html.match(/USD[\s\/]*to[\s]*IDR[^\d]+([\d,\.]+)/i)
-      if (rateMatch) console.log('✓ Pattern 4 matched')
-    }
-    
-    // Pattern 5: JSON-LD structured data
-    if (!rateMatch) {
-      const jsonMatch = html.match(/"price"\s*:\s*"?([0-9,\.]+)"?/i)
-      if (jsonMatch) {
-        rateMatch = jsonMatch
-        console.log('✓ Pattern 5 matched')
-      }
-    }
-    
-    // Pattern 6: class fxKbKc tanpa YMlKec
-    if (!rateMatch) {
-      rateMatch = html.match(/class="[^"]*fxKbKc[^"]*"[^>]*>([0-9,\.]+)<\/div>/i)
-      if (rateMatch) console.log('✓ Pattern 6 matched')
-    }
-    
-    // Pattern 7: Cari di script tag dengan window variables
-    if (!rateMatch) {
-      const scriptMatch = html.match(/window\[['"]ds:[\d]+['"]\]\s*=\s*.*?"([0-9,\.]+)"/i)
-      if (scriptMatch) {
-        rateMatch = scriptMatch
-        console.log('✓ Pattern 7 matched')
-      }
-    }
+    let rateMatch = html.match(/class="YMlKec fxKbKc"[^>]*>([0-9,\.]+)<\/div>/i)
+    if (!rateMatch) rateMatch = html.match(/data-last-price="([0-9,\.]+)"/i)
+    if (!rateMatch) rateMatch = html.match(/class="[^"]*fxKbKc[^"]*"[^>]*>([0-9,\.]+)<\/div>/i)
     
     if (rateMatch && rateMatch[1]) {
-      const rateStr = rateMatch[1].replace(/,/g, '')
-      const rate = parseFloat(rateStr)
+      const rate = parseFloat(rateMatch[1].replace(/,/g, ''))
       
-      console.log(`💵 Parsed rate: ${rate}`)
-      
-      // Sanity check
       if (rate > 1000 && rate < 50000) {
-        // Extract perubahan harga
         let change = 0
         let changePercent = 0
         
-        const changePatterns = [
-          /class="[^"]*P2Luy[^"]*"[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i,
-          /class="[^"]*enJeMd[^"]*"[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i,
-          /"change"\s*:\s*"?([+-]?[\d,\.]+)"?/i
-        ]
-        
-        for (const pattern of changePatterns) {
-          const changeMatch = html.match(pattern)
-          if (changeMatch) {
-            change = parseFloat(changeMatch[1].replace(/,/g, ''))
-            if (changeMatch[2]) {
-              changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
-            }
-            console.log(`📊 Change found: ${change} (${changePercent}%)`)
-            break
-          }
+        const changeMatch = html.match(/class="[^"]*P2Luy[^"]*"[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i)
+        if (changeMatch) {
+          change = parseFloat(changeMatch[1].replace(/,/g, ''))
+          changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
         }
         
-        pushLog(`Google Finance: USD/IDR = ${rate}`)
-        
-        return { 
-          rate, 
-          change, 
-          changePercent 
-        }
-      } else {
-        console.log(`❌ Rate out of range: ${rate}`)
+        return { rate, change, changePercent }
       }
     }
     
-    throw new Error('Failed to parse USD/IDR from HTML')
-    
+    throw new Error('Parse failed')
   } catch (e) {
-    console.error('❌ Google Finance error:', e.message)
-    pushLog(`Google Finance error: ${e.message}`)
-    
-    // Fallback
     return await fetchUSDIDRFallback()
   }
 }
 
-function formatMessage(treasuryData, usdIdrData) {
+// FORMAT MESSAGE dengan indikator naik/turun
+function formatMessage(treasuryData, usdIdrData, priceChange = null) {
   const buy = treasuryData?.data?.buying_rate || 0
   const sell = treasuryData?.data?.selling_rate || 0
   const updated = treasuryData?.data?.updated_at || new Date().toISOString()
@@ -311,7 +216,17 @@ function formatMessage(treasuryData, usdIdrData) {
   const spread = sell - buy
   const spreadPercent = ((spread / buy) * 100).toFixed(2)
   
-  return `💎 *HARGA EMAS TREASURY* 💎
+  // Indikator perubahan harga
+  let priceIndicator = ''
+  if (priceChange) {
+    if (priceChange.buyChange > 0 || priceChange.sellChange > 0) {
+      priceIndicator = ' 📈'
+    } else if (priceChange.buyChange < 0 || priceChange.sellChange < 0) {
+      priceIndicator = ' 📉'
+    }
+  }
+  
+  return `💎 *HARGA EMAS TREASURY* 💎${priceIndicator}
 ⏰ ${timeStr} WIB
 
 ┏━━━━━━━━━━━━━━━━━━━
@@ -324,7 +239,7 @@ function formatMessage(treasuryData, usdIdrData) {
 
 ${generateDiscountSimulation(buy, sell)}
 
-⚡ _Reply max 1x/menit • Data real-time_`
+⚡ _Update otomatis saat harga berubah_`
 }
 
 function generateDiscountSimulation(buy, sell) {
@@ -353,197 +268,168 @@ function generateDiscountSimulation(buy, sell) {
 }
 
 async function fetchTreasury() {
-  let lastErr
-  for (let i = 0; i < 2; i++) {
-    try {
-      const res = await fetch(TREASURY_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      const json = await res.json()
-      if (!json?.data?.buying_rate || !json?.data?.selling_rate) {
-        throw new Error('Invalid data')
-      }
-      return json
-    } catch (e) {
-      lastErr = e
-      await new Promise((r) => setTimeout(r, 500))
+  try {
+    const res = await fetch(TREASURY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(5000) // 5 detik timeout
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const json = await res.json()
+    if (!json?.data?.buying_rate || !json?.data?.selling_rate) {
+      throw new Error('Invalid data')
     }
+    return json
+  } catch (e) {
+    throw e
   }
-  throw lastErr
 }
 
 // ------ SUBSCRIPTION BROADCAST ------
-async function broadcastToSubscribers() {
+async function broadcastToSubscribers(priceChange = null) {
   const now = new Date()
   const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
   
   console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`)
   console.log(`🔔 BROADCAST TRIGGERED at ${timeStr}`)
-  console.log(`📊 Status: isReady=${isReady}, sock=${!!sock}, subscribers=${subscriptions.size}`)
+  console.log(`📊 Subscribers: ${subscriptions.size}`)
+  
+  if (priceChange) {
+    console.log(`📈 Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)}`)
+    console.log(`📈 Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
+  }
+  
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`)
 
-  if (!sock) {
-    console.log('❌ Socket not initialized')
+  if (!sock || !isReady || subscriptions.size === 0) {
+    console.log('❌ Broadcast skipped')
     return
   }
-
-  if (!isReady) {
-    console.log('❌ Bot not ready yet')
-    return
-  }
-
-  if (subscriptions.size === 0) {
-    console.log('❌ No subscribers')
-    return
-  }
-
-  console.log(`📢 Broadcasting to ${subscriptions.size} subscriber(s)...`)
 
   try {
-    console.log('📥 Fetching data...')
     const [treasury, usdIdr] = await Promise.all([
       fetchTreasury(),
       fetchUSDIDRFromGoogle()
     ])
     
-    const message = formatMessage(treasury, usdIdr)
-    console.log('✅ Data fetched successfully')
+    const message = formatMessage(treasury, usdIdr, priceChange)
     
     let successCount = 0
-    let failCount = 0
     
     for (const chatId of subscriptions) {
       try {
-        console.log(`📤 Sending to ${chatId}...`)
         await sock.sendMessage(chatId, { text: message })
         successCount++
-        console.log(`✅ Sent to ${chatId}`)
-        
         await new Promise(r => setTimeout(r, 2000))
       } catch (e) {
-        failCount++
-        console.log(`❌ Failed to send to ${chatId}: ${e.message}`)
+        console.log(`❌ Failed: ${chatId.substring(0, 20)}`)
       }
     }
     
-    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`)
-    console.log(`📊 Broadcast complete: ${successCount} success, ${failCount} failed`)
-    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`)
+    console.log(`✅ Broadcast: ${successCount}/${subscriptions.size}\n`)
     
   } catch (e) {
-    console.error('❌ Broadcast error:', e)
+    console.error('❌ Broadcast error:', e.message)
   }
 }
 
-// Broadcast scheduler
-setInterval(() => {
-  const now = new Date()
-  const currentMinute = now.getMinutes()
-  const currentSecond = now.getSeconds()
-  
-  if (currentSecond === 1 && currentMinute !== lastBroadcastMinute) {
-    lastBroadcastMinute = currentMinute
-    broadcastToSubscribers()
+// ------ PRICE MONITORING (50 detik) ------
+async function checkPriceUpdate() {
+  if (!isReady || subscriptions.size === 0) {
+    return
   }
-}, 1000)
 
-console.log('✅ Broadcast scheduler started (every minute at :01 seconds)')
+  try {
+    const treasuryData = await fetchTreasury()
+    const currentPrice = {
+      buy: treasuryData?.data?.buying_rate,
+      sell: treasuryData?.data?.selling_rate,
+      updated_at: treasuryData?.data?.updated_at
+    }
+
+    // Cek perubahan harga
+    if (!lastKnownPrice) {
+      console.log('📊 First price check')
+      lastKnownPrice = currentPrice
+    } else if (
+      lastKnownPrice.buy !== currentPrice.buy || 
+      lastKnownPrice.sell !== currentPrice.sell ||
+      lastKnownPrice.updated_at !== currentPrice.updated_at
+    ) {
+      // HARGA BERUBAH!
+      const priceChange = {
+        buyChange: currentPrice.buy - lastKnownPrice.buy,
+        sellChange: currentPrice.sell - lastKnownPrice.sell
+      }
+      
+      console.log('\n🔔 PRICE CHANGED!')
+      console.log(`Buy: ${formatRupiah(lastKnownPrice.buy)} → ${formatRupiah(currentPrice.buy)} (${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)})`)
+      console.log(`Sell: ${formatRupiah(lastKnownPrice.sell)} → ${formatRupiah(currentPrice.sell)} (${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)})`)
+      
+      pushLog(`Price changed: Buy ${priceChange.buyChange > 0 ? '↑' : '↓'} Sell ${priceChange.sellChange > 0 ? '↑' : '↓'}`)
+      
+      lastKnownPrice = currentPrice
+      
+      // Trigger broadcast
+      await broadcastToSubscribers(priceChange)
+    } else {
+      console.log('✓ No change')
+    }
+  } catch (e) {
+    console.error('❌ Price check error:', e.message)
+  }
+}
+
+// Start monitoring setiap 50 detik
+setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
+console.log(`✅ Price monitoring: every ${PRICE_CHECK_INTERVAL/1000}s`)
 
 // ------ EXPRESS ------
 const app = express()
 app.use(express.json())
 
 app.get('/', (_req, res) => {
-  res.type('text/plain').send('✅ Bot WhatsApp Emas is running')
+  res.send('✅ Bot Running')
 })
 
 app.get('/qr', async (_req, res) => {
   if (!lastQr) {
-    return res
-      .status(200)
-      .type('text/html')
-      .send('<pre>QR belum siap atau sudah terscan.\n\n✅ Bot is running</pre>')
+    return res.send('<pre>QR belum siap\n\n✅ Bot running</pre>')
   }
 
   try {
     const mod = await import('qrcode').catch(() => null)
     if (mod?.toDataURL) {
       const dataUrl = await mod.toDataURL(lastQr, { margin: 1 })
-      return res.status(200).type('text/html').send(`
-        <div style="text-align: center; padding: 20px;">
-          <h2>📱 Scan QR Code</h2>
-          <img src="${dataUrl}" style="max-width: 400px;" />
-          <p>Scan dengan WhatsApp untuk connect bot</p>
-        </div>
-      `)
+      return res.send(`<div style="text-align:center;padding:20px"><h2>📱 Scan QR</h2><img src="${dataUrl}" style="max-width:400px"/></div>`)
     }
   } catch (_) {}
-  res.status(200).type('text/plain').send(lastQr)
+  res.send(lastQr)
 })
 
 app.get('/stats', (_req, res) => {
-  const stats = {
-    status: isReady ? '🟢 Online' : '🔴 Warming up',
-    uptime: Math.floor(process.uptime()),
-    totalChats: lastReplyAtPerChat.size,
-    totalSubscribers: subscriptions.size,
-    subscribers: Array.from(subscriptions).map(id => ({
-      id: id.substring(0, 25) + '...',
-      type: id.endsWith('@g.us') ? 'GROUP' : 'DM'
-    })),
-    processedMessages: processedMsgIds.size,
-    reconnectAttempts,
-    lastBroadcastMinute,
-    activeChats: Array.from(lastReplyAtPerChat.entries())
-      .slice(-10)
-      .map(([chat, lastTime]) => ({
-        chat: chat.substring(0, 25) + '...',
-        type: chat.endsWith('@g.us') ? 'GROUP' : 'DM',
-        lastReply: new Date(lastTime).toISOString(),
-        cooldown: Math.max(0, Math.round((COOLDOWN_PER_CHAT - (Date.now() - lastTime)) / 1000)) + 's'
-      })),
-    recentLogs: logs.slice(-20)
-  }
-  res.json(stats)
-})
-
-app.get('/subscribers', (_req, res) => {
   res.json({
-    total: subscriptions.size,
-    subscribers: Array.from(subscriptions)
+    status: isReady ? '🟢 Online' : '🔴 Warming',
+    uptime: Math.floor(process.uptime()),
+    subscribers: subscriptions.size,
+    lastPrice: lastKnownPrice ? {
+      buy: formatRupiah(lastKnownPrice.buy),
+      sell: formatRupiah(lastKnownPrice.sell),
+      updated: lastKnownPrice.updated_at
+    } : null,
+    checkInterval: `${PRICE_CHECK_INTERVAL/1000}s`,
+    logs: logs.slice(-10)
   })
-})
-
-app.post('/subscribe', (req, res) => {
-  const { chatId } = req.body
-  if (!chatId) {
-    return res.status(400).json({ error: 'chatId required' })
-  }
-  subscriptions.add(chatId)
-  pushLog(`Manual subscribe: ${chatId}`)
-  res.json({ success: true, total: subscriptions.size })
-})
-
-app.post('/unsubscribe', (req, res) => {
-  const { chatId } = req.body
-  if (!chatId) {
-    return res.status(400).json({ error: 'chatId required' })
-  }
-  subscriptions.delete(chatId)
-  pushLog(`Manual unsubscribe: ${chatId}`)
-  res.json({ success: true, total: subscriptions.size })
 })
 
 app.get('/broadcast-now', async (_req, res) => {
-  console.log('\n🔴 Manual broadcast triggered via API')
   await broadcastToSubscribers()
-  res.json({ 
-    success: true, 
-    subscribers: subscriptions.size,
-    message: 'Broadcast triggered'
-  })
+  res.json({ ok: true })
+})
+
+app.get('/check-price', async (_req, res) => {
+  await checkPriceUpdate()
+  res.json({ ok: true, lastPrice: lastKnownPrice })
 })
 
 app.get('/test', async (_req, res) => {
@@ -552,7 +438,6 @@ app.get('/test', async (_req, res) => {
       fetchTreasury(),
       fetchUSDIDRFromGoogle()
     ])
-    
     const message = formatMessage(treasury, usdIdr)
     res.type('text/plain').send(message)
   } catch (e) {
@@ -560,63 +445,11 @@ app.get('/test', async (_req, res) => {
   }
 })
 
-// ENDPOINT BARU: Test USD/IDR
-app.get('/test-usd', async (_req, res) => {
-  try {
-    console.log('\n🧪 Testing USD/IDR fetch...')
-    const usdIdr = await fetchUSDIDRFromGoogle()
-    res.json({
-      success: true,
-      data: usdIdr,
-      timestamp: new Date().toISOString()
-    })
-  } catch (e) {
-    res.status(500).json({
-      success: false,
-      error: e.message
-    })
-  }
-})
-
-// ENDPOINT BARU: Debug Google Finance
-app.get('/debug-google', async (_req, res) => {
-  try {
-    const url = 'https://www.google.com/finance/quote/USD-IDR'
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    })
-    const html = await response.text()
-    
-    // Cari semua angka yang mirip 15xxx - 16xxx
-    const possibleRates = html.match(/1[45][0-9]{3}[,\.]?[0-9]*/g)
-    
-    res.type('text/html').send(`
-      <h2>Debug Google Finance</h2>
-      <h3>Status: ${response.status}</h3>
-      <h3>HTML Length: ${html.length}</h3>
-      <h3>Possible Rates Found:</h3>
-      <pre>${JSON.stringify(possibleRates?.slice(0, 20), null, 2)}</pre>
-      <h3>HTML Preview (first 5000 chars):</h3>
-      <textarea style="width:100%; height:400px">${html.substring(0, 5000)}</textarea>
-    `)
-  } catch (e) {
-    res.status(500).send(`Error: ${e.message}`)
-  }
-})
-
 app.listen(PORT, () => {
-  console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`)
-  console.log(`🌐 Server running on port ${PORT}`)
-  console.log(`📊 Stats: http://localhost:${PORT}/stats`)
-  console.log(`👥 Subscribers: http://localhost:${PORT}/subscribers`)
-  console.log(`🔴 Broadcast Now: http://localhost:${PORT}/broadcast-now`)
-  console.log(`🧪 Test Message: http://localhost:${PORT}/test`)
-  console.log(`💵 Test USD/IDR: http://localhost:${PORT}/test-usd`)
-  console.log(`🔍 Debug Google: http://localhost:${PORT}/debug-google`)
-  console.log(`📱 QR: http://localhost:${PORT}/qr`)
-  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`)
+  console.log(`\n🌐 Server: http://localhost:${PORT}`)
+  console.log(`📊 Stats: /stats`)
+  console.log(`🔴 Broadcast: /broadcast-now`)
+  console.log(`🔍 Check: /check-price\n`)
 })
 
 // ------ WHATSAPP ------
@@ -641,15 +474,11 @@ async function start() {
     keepAliveIntervalMs: 30000,
     connectTimeoutMs: 60000,
     generateHighQualityLinkPreview: false,
-    getMessage: async (key) => {
-      return { conversation: '' }
-    }
+    getMessage: async () => ({ conversation: '' })
   })
 
   setInterval(() => {
-    if (sock && sock.ws && sock.ws.readyState === 1) {
-      sock.ws.ping()
-    }
+    if (sock?.ws?.readyState === 1) sock.ws.ping()
   }, 30000)
 
   sock.ev.on('connection.update', async (u) => {
@@ -657,53 +486,39 @@ async function start() {
     
     if (qr) {
       lastQr = qr
-      console.log('📲 QR ready - Open /qr')
-      pushLog('QR generated')
+      console.log('📲 QR ready')
+      pushLog('QR ready')
     }
     
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode
-      console.log(`❌ Connection closed: ${reason}`)
-      pushLog(`Closed: ${reason}`)
+      console.log(`❌ Closed: ${reason}`)
       
       if (reason === DisconnectReason.loggedOut) {
-        console.log('⚠️  LOGGED OUT - Scan QR at /qr')
-        pushLog('LOGGED OUT')
+        console.log('⚠️  LOGGED OUT')
         lastQr = null
-        reconnectAttempts = 0
         return
       }
       
       if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         const delay = BASE_RECONNECT_DELAY * Math.pow(1.5, reconnectAttempts)
         reconnectAttempts++
-        console.log(`🔄 Reconnecting in ${Math.round(delay/1000)}s (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
-        pushLog(`Reconnect attempt ${reconnectAttempts}`)
-        
-        setTimeout(() => {
-          console.log('🔄 Attempting reconnect...')
-          start()
-        }, delay)
-      } else {
-        console.log('❌ Max reconnect attempts')
-        pushLog('Max reconnect')
-        process.exit(1)
+        console.log(`🔄 Reconnect in ${Math.round(delay/1000)}s`)
+        setTimeout(() => start(), delay)
       }
       
     } else if (connection === 'open') {
       lastQr = null
       reconnectAttempts = 0
-      console.log('✅ Connected!')
-      pushLog('Connected')
+      console.log('✅ Connected')
       
       isReady = false
-      console.log('⏳ Warmup 20s...')
+      console.log('⏳ Warmup 20s')
       
       setTimeout(() => {
         isReady = true
         console.log('🟢 Ready!')
-        console.log(`📊 Subscribers: ${subscriptions.size}`)
-        pushLog('Bot ready')
+        checkPriceUpdate()
       }, 20000)
     }
   })
@@ -711,8 +526,7 @@ async function start() {
   sock.ev.on('creds.update', saveCreds)
 
   sock.ev.on('messages.upsert', async (ev) => {
-    if (!isReady) return
-    if (ev.type !== 'notify') return
+    if (!isReady || ev.type !== 'notify') return
     
     for (const msg of ev.messages) {
       try {
@@ -728,54 +542,47 @@ async function start() {
         const sendTarget = msg.key.remoteJid
         const isGroup = isGroupMessage(msg)
         
-        // Command: langganan
+        // langganan
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Anda sudah berlangganan!\n\n📢 Anda akan menerima update harga emas otomatis setiap menit.\n\n_Ketik "berhenti" untuk berhenti langganan._'
+              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah.\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
-            console.log(`➕ New subscriber: ${sendTarget} (${isGroup ? 'GROUP' : 'DM'})`)
-            pushLog(`New subscriber: ${sendTarget}`)
+            console.log(`➕ New: ${sendTarget.substring(0, 20)} (${isGroup ? 'GROUP' : 'DM'})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 *Langganan Berhasil!*\n\n📢 Anda akan menerima update harga emas otomatis setiap menit di detik ke-01.\n\n_Ketik "berhenti" untuk berhenti langganan._'
+              text: '🎉 *Langganan Berhasil!*\n\n📢 Update otomatis saat harga berubah (cek setiap 50 detik).\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
         }
         
-if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
+        // berhenti
+        if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             subscriptions.delete(sendTarget)
-            console.log(`➖ Unsubscribed: ${sendTarget}`)
-            pushLog(`Unsubscribed: ${sendTarget}`)
+            console.log(`➖ Unsub: ${sendTarget.substring(0, 20)}`)
             
             await sock.sendMessage(sendTarget, {
-              text: '👋 Langganan dihentikan.\n\n_Ketik "langganan" untuk berlangganan kembali._'
+              text: '👋 Langganan dihentikan.\n\n_Ketik "langganan" untuk mulai lagi._'
             }, { quoted: msg })
           } else {
             await sock.sendMessage(sendTarget, {
-              text: '❌ Anda belum berlangganan.\n\n_Ketik "langganan" untuk mulai berlangganan._'
+              text: '❌ Belum berlangganan.\n\n_Ketik "langganan" untuk mulai._'
             }, { quoted: msg })
           }
           continue
         }
         
-        // Trigger: emas
+        // emas
         if (!/\bemas\b/.test(text)) continue
 
         const now = Date.now()
-        
-        console.log(`📨 Message from: ${isGroup ? 'GROUP' : 'DM'} | ${sendTarget}`)
-        
         const lastReply = lastReplyAtPerChat.get(sendTarget) || 0
-        const timeSinceLastReply = now - lastReply
         
-        if (timeSinceLastReply < COOLDOWN_PER_CHAT) {
-          const remaining = Math.ceil((COOLDOWN_PER_CHAT - timeSinceLastReply) / 1000)
-          console.log(`⏳ Cooldown: ${remaining}s`)
+        if (now - lastReply < COOLDOWN_PER_CHAT) {
           continue
         }
         
@@ -795,11 +602,9 @@ if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
             fetchTreasury(),
             fetchUSDIDRFromGoogle()
           ])
-          
           replyText = formatMessage(treasury, usdIdr)
         } catch (e) {
-          replyText = '❌ Gagal mengambil data.\n⏱️ Coba lagi nanti.'
-          pushLog(`Error: ${e.message}`)
+          replyText = '❌ Gagal mengambil data.\n⏱️ Coba lagi.'
         }
 
         const randomDelay = Math.floor(Math.random() * (RANDOM_DELAY_MAX - RANDOM_DELAY_MIN)) + RANDOM_DELAY_MIN
@@ -809,22 +614,16 @@ if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
           await sock.sendPresenceUpdate('paused', sendTarget)
         } catch (_) {}
         
-        await sock.sendMessage(
-          sendTarget,
-          { text: replyText },
-          { quoted: msg }
-        )
+        await sock.sendMessage(sendTarget, { text: replyText }, { quoted: msg })
 
         lastReplyAtPerChat.set(sendTarget, now)
         lastGlobalReplyAt = now
         
         console.log(`✅ Sent`)
-        
         await new Promise(r => setTimeout(r, 2000))
         
       } catch (e) {
-        console.error('Error:', e)
-        await new Promise(r => setTimeout(r, 5000))
+        console.error('Error:', e.message)
       }
     }
   })
