@@ -23,13 +23,17 @@ const RANDOM_DELAY_MAX = 1000
 
 // REAL-TIME dengan DEBOUNCE & MIN CHANGE
 const PRICE_CHECK_INTERVAL = 2000 // Cek setiap 2 detik
-const DEBOUNCE_TIME = 5000 // 5 detik (dari 3 detik)
+const DEBOUNCE_TIME = 5000 // 5 detik
 const MIN_PRICE_CHANGE = 50 // Minimal perubahan 50 rupiah untuk broadcast
+const MIN_BROADCAST_INTERVAL = 10000 // Minimal 10 detik antar broadcast (BARU)
+
 let lastKnownPrice = null
-let lastBroadcastedPrice = null // Harga terakhir yang di-broadcast
+let lastBroadcastedPrice = null
+let lastBroadcastTime = 0 // Track waktu broadcast terakhir (BARU)
 let isBroadcasting = false
 let pendingBroadcast = null
 let latestPriceChange = null
+let broadcastCount = 0 // Counter untuk debugging (BARU)
 
 // Reconnect settings
 let reconnectAttempts = 0
@@ -50,7 +54,7 @@ const subscriptions = new Set()
 function pushLog(s) {
   const logMsg = `${new Date().toISOString().substring(11, 19)} ${s}`
   logs.push(logMsg)
-  if (logs.length > 20) logs.shift()
+  if (logs.length > 30) logs.shift() // Tambah history log
   console.log(logMsg)
 }
 
@@ -155,6 +159,58 @@ async function fetchUSDIDRFallback() {
   return { rate: 15750, change: 0, changePercent: 0 }
 }
 
+async function fetchXAUUSD() {
+  try {
+    // Metals-API alternatif: gunakan free tier atau API lain
+    const res = await fetch('https://api.gold-api.com/price/XAU', {
+      signal: AbortSignal.timeout(3000)
+    })
+    
+    if (res.ok) {
+      const json = await res.json()
+      // Response format: { price: 2650.50, currency: "USD", timestamp: ... }
+      if (json?.price) {
+        return { 
+          price: json.price,
+          change: json.ch || 0,
+          changePercent: json.chp || 0,
+          timestamp: json.timestamp
+        }
+      }
+    }
+  } catch (_) {}
+  
+  // Fallback: scrape dari Google Finance
+  try {
+    const res = await fetch('https://www.google.com/finance/quote/XAU-USD', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      signal: AbortSignal.timeout(3000)
+    })
+    
+    if (res.ok) {
+      const html = await res.text()
+      let priceMatch = html.match(/class="YMlKec fxKbKc"[^>]*>([0-9,\.]+)<\/div>/i)
+      if (!priceMatch) priceMatch = html.match(/class="[^"]*fxKbKc[^"]*"[^>]*>([0-9,\.]+)<\/div>/i)
+      
+      if (priceMatch?.[1]) {
+        const price = parseFloat(priceMatch[1].replace(/,/g, ''))
+        if (price > 1000 && price < 10000) {
+          let change = 0, changePercent = 0
+          const changeMatch = html.match(/class="[^"]*P2Luy[^"]*"[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i)
+          if (changeMatch) {
+            change = parseFloat(changeMatch[1].replace(/,/g, ''))
+            changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
+          }
+          return { price, change, changePercent }
+        }
+      }
+    }
+  } catch (_) {}
+  
+  // Last fallback
+  return { price: 2650, change: 0, changePercent: 0 }
+}
+
 async function fetchUSDIDRFromGoogle() {
   try {
     const res = await fetch('https://www.google.com/finance/quote/USD-IDR', {
@@ -184,7 +240,7 @@ async function fetchUSDIDRFromGoogle() {
   return await fetchUSDIDRFallback()
 }
 
-function formatMessage(treasuryData, usdIdrData, priceChange = null) {
+function formatMessage(treasuryData, usdIdrData, xauUsdData = null, priceChange = null) {
   const buy = treasuryData?.data?.buying_rate || 0
   const sell = treasuryData?.data?.selling_rate || 0
   const updated = treasuryData?.data?.updated_at || new Date().toISOString()
@@ -209,6 +265,24 @@ function formatMessage(treasuryData, usdIdrData, priceChange = null) {
     }
   }
   
+  // Format XAU/USD
+  let xauUsdSection = ''
+  if (xauUsdData) {
+    const xauPrice = xauUsdData.price
+    const xauChange = xauUsdData.change
+    const xauChangePercent = xauUsdData.changePercent
+    const xauEmoji = xauChange >= 0 ? '📈' : '📉'
+    const xauSign = xauChange >= 0 ? '+' : ''
+    
+    // Konversi XAU/USD ke IDR per gram
+    const xauPerOunce = xauPrice // harga per troy ounce
+    const xauPerGram = xauPerOunce / 31.1035 // 1 troy oz = 31.1035 gram
+    const xauIdrPerGram = xauPerGram * usdIdrRate
+    
+    xauUsdSection = `\n🌍 *XAU/USD:* ${xauPrice.toFixed(2)}/oz ${xauSign}${Math.abs(xauChangePercent).toFixed(2)}% ${xauEmoji}
+   ≈ Rp${formatRupiah(Math.round(xauIdrPerGram))}/gr`
+  }
+  
   return `💎 *HARGA EMAS TREASURY* 💎${priceIndicator}
 ⏰ ${timeStr} WIB
 
@@ -218,7 +292,7 @@ function formatMessage(treasuryData, usdIdrData, priceChange = null) {
 ┣ 📉 *Spread:* Rp${formatRupiah(spread)} (${spreadPercent}%)
 ┗━━━━━━━━━━━━━━━━━━━
 
-💵 *USD/IDR:* Rp${formatRupiah(Math.round(usdIdrRate))} ${usdIdrSign}${Math.abs(usdIdrChangePercent).toFixed(2)}% ${usdIdrEmoji}
+💵 *USD/IDR:* Rp${formatRupiah(Math.round(usdIdrRate))} ${usdIdrSign}${Math.abs(usdIdrChangePercent).toFixed(2)}% ${usdIdrEmoji}${xauUsdSection}
 
 ${generateDiscountSimulation(buy, sell)}
 
@@ -254,7 +328,7 @@ async function fetchTreasury() {
   const res = await fetch(TREASURY_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    signal: AbortSignal.timeout(2000)
+    signal: AbortSignal.timeout(3000) // Tambah timeout
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const json = await res.json()
@@ -264,10 +338,25 @@ async function fetchTreasury() {
   return json
 }
 
-// ------ DEBOUNCED BROADCAST ------
+// ------ DEBOUNCED BROADCAST (FIXED) ------
 async function doBroadcast(priceChange) {
-  if (isBroadcasting) return
+  // PERBAIKAN 1: Cek apakah sedang broadcasting
+  if (isBroadcasting) {
+    pushLog('⏭️  Broadcast already in progress, skipping')
+    return
+  }
+
+  // PERBAIKAN 2: Cek minimal interval antar broadcast
+  const now = Date.now()
+  if (now - lastBroadcastTime < MIN_BROADCAST_INTERVAL) {
+    const remaining = Math.ceil((MIN_BROADCAST_INTERVAL - (now - lastBroadcastTime)) / 1000)
+    pushLog(`⏭️  Too soon, wait ${remaining}s`)
+    return
+  }
+
   isBroadcasting = true
+  broadcastCount++
+  const currentBroadcastId = broadcastCount
 
   const time = new Date().toISOString().substring(11, 19)
   
@@ -282,6 +371,15 @@ async function doBroadcast(priceChange) {
       fetchUSDIDRFromGoogle()
     ])
     
+    // PERBAIKAN 3: Cek apakah harga masih berbeda dari broadcast terakhir
+    if (lastBroadcastedPrice && 
+        lastBroadcastedPrice.buy === treasury?.data?.buying_rate &&
+        lastBroadcastedPrice.sell === treasury?.data?.selling_rate) {
+      pushLog(`⏭️  Price unchanged from last broadcast, skipping`)
+      isBroadcasting = false
+      return
+    }
+    
     // Update last broadcasted price
     lastBroadcastedPrice = {
       buy: treasury?.data?.buying_rate,
@@ -290,21 +388,27 @@ async function doBroadcast(priceChange) {
     
     const message = formatMessage(treasury, usdIdr, priceChange)
     
-    console.log(`📤 ${time} Broadcasting to ${subscriptions.size} subs`)
+    pushLog(`📤 [#${currentBroadcastId}] Broadcasting to ${subscriptions.size} subs`)
+    
+    let successCount = 0
+    let failCount = 0
     
     for (const chatId of subscriptions) {
       try {
         await sock.sendMessage(chatId, { text: message })
+        successCount++
         await new Promise(r => setTimeout(r, 1000))
       } catch (e) {
-        console.log(`❌ Failed: ${chatId.substring(0, 15)}`)
+        failCount++
+        pushLog(`❌ Failed: ${chatId.substring(0, 15)}`)
       }
     }
     
-    pushLog(`✅ Broadcast sent`)
+    lastBroadcastTime = Date.now() // Update waktu broadcast terakhir
+    pushLog(`✅ [#${currentBroadcastId}] Sent: ${successCount}, Failed: ${failCount}`)
     
   } catch (e) {
-    console.error('Broadcast error:', e.message)
+    pushLog(`❌ Broadcast error: ${e.message}`)
   }
   
   isBroadcasting = false
@@ -314,19 +418,21 @@ function scheduleBroadcast(priceChange) {
   // Cancel pending broadcast
   if (pendingBroadcast) {
     clearTimeout(pendingBroadcast)
+    pushLog('⏱️  Debounce reset (price still changing)')
   }
   
   latestPriceChange = priceChange
   
   // Schedule broadcast
   pendingBroadcast = setTimeout(async () => {
+    pushLog('✓ Price stabilized, broadcasting...')
     await doBroadcast(latestPriceChange)
     pendingBroadcast = null
     latestPriceChange = null
   }, DEBOUNCE_TIME)
 }
 
-// ------ REAL-TIME PRICE MONITOR ------
+// ------ REAL-TIME PRICE MONITOR (IMPROVED) ------
 async function checkPriceUpdate() {
   if (!isReady || subscriptions.size === 0) return
 
@@ -341,48 +447,55 @@ async function checkPriceUpdate() {
     if (!lastKnownPrice) {
       lastKnownPrice = currentPrice
       lastBroadcastedPrice = currentPrice
-      console.log(`📊 First check: Buy=${formatRupiah(currentPrice.buy)}, Sell=${formatRupiah(currentPrice.sell)}`)
+      pushLog(`📊 Initial: Buy=${formatRupiah(currentPrice.buy)}, Sell=${formatRupiah(currentPrice.sell)}`)
       return
     }
     
-    // Cek apakah harga berubah
-    if (
-      lastKnownPrice.buy !== currentPrice.buy || 
-      lastKnownPrice.sell !== currentPrice.sell ||
-      lastKnownPrice.updated_at !== currentPrice.updated_at
-    ) {
-      const priceChange = {
-        buyChange: currentPrice.buy - lastKnownPrice.buy,
-        sellChange: currentPrice.sell - lastKnownPrice.sell
-      }
-      
-      // Cek perubahan vs harga terakhir yang di-broadcast
-      const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
-      const sellChangeSinceBroadcast = Math.abs(currentPrice.sell - (lastBroadcastedPrice?.sell || currentPrice.sell))
-      
-      // FILTER: Hanya broadcast jika perubahan >= MIN_PRICE_CHANGE
-      if (buyChangeSinceBroadcast < MIN_PRICE_CHANGE && sellChangeSinceBroadcast < MIN_PRICE_CHANGE) {
-        const time = new Date().toISOString().substring(11, 19)
-        console.log(`⏭️  ${time} Price changed but < Rp${MIN_PRICE_CHANGE} (Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)}, Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}) - SKIPPED`)
-        lastKnownPrice = currentPrice
-        return
-      }
-      
-      const time = new Date().toISOString().substring(11, 19)
-      const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
-      const sellIcon = priceChange.sellChange > 0 ? '📈' : '📉'
-      
-      console.log(`\n🔔 ${time} PRICE CHANGED!`)
-      console.log(`${buyIcon} Buy: ${formatRupiah(lastKnownPrice.buy)} → ${formatRupiah(currentPrice.buy)} (${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)})`)
-      console.log(`${sellIcon} Sell: ${formatRupiah(lastKnownPrice.sell)} → ${formatRupiah(currentPrice.sell)} (${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)})`)
-      
-      lastKnownPrice = currentPrice
-      
-      // Schedule broadcast dengan debounce
-      scheduleBroadcast(priceChange)
+    // PERBAIKAN 4: Cek perubahan harga lebih ketat
+    const buyChanged = lastKnownPrice.buy !== currentPrice.buy
+    const sellChanged = lastKnownPrice.sell !== currentPrice.sell
+    const timestampChanged = lastKnownPrice.updated_at !== currentPrice.updated_at
+    
+    if (!buyChanged && !sellChanged && !timestampChanged) {
+      // Tidak ada perubahan sama sekali
+      return
     }
+    
+    // Ada perubahan, hitung delta
+    const priceChange = {
+      buyChange: currentPrice.buy - lastKnownPrice.buy,
+      sellChange: currentPrice.sell - lastKnownPrice.sell
+    }
+    
+    // Cek perubahan vs harga terakhir yang di-broadcast
+    const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
+    const sellChangeSinceBroadcast = Math.abs(currentPrice.sell - (lastBroadcastedPrice?.sell || currentPrice.sell))
+    
+    // Update lastKnownPrice dulu
+    lastKnownPrice = currentPrice
+    
+    // FILTER: Hanya broadcast jika perubahan >= MIN_PRICE_CHANGE
+    if (buyChangeSinceBroadcast < MIN_PRICE_CHANGE && sellChangeSinceBroadcast < MIN_PRICE_CHANGE) {
+      const time = new Date().toISOString().substring(11, 19)
+      const buyIcon = priceChange.buyChange > 0 ? '📈' : priceChange.buyChange < 0 ? '📉' : '➡️'
+      const sellIcon = priceChange.sellChange > 0 ? '📈' : priceChange.sellChange < 0 ? '📉' : '➡️'
+      pushLog(`⏭️  ${time} Change < Rp${MIN_PRICE_CHANGE} ${buyIcon}B:${priceChange.buyChange} ${sellIcon}S:${priceChange.sellChange} - SKIP`)
+      return
+    }
+    
+    const time = new Date().toISOString().substring(11, 19)
+    const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
+    const sellIcon = priceChange.sellChange > 0 ? '📈' : '📉'
+    
+    pushLog(`\n🔔 ${time} PRICE CHANGE!`)
+    pushLog(`${buyIcon} Buy: ${formatRupiah(lastKnownPrice.buy - priceChange.buyChange)} → ${formatRupiah(currentPrice.buy)} (${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)})`)
+    pushLog(`${sellIcon} Sell: ${formatRupiah(lastKnownPrice.sell - priceChange.sellChange)} → ${formatRupiah(currentPrice.sell)} (${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)})`)
+    
+    // Schedule broadcast dengan debounce
+    scheduleBroadcast(priceChange)
+    
   } catch (e) {
-    // Silent fail
+    // Silent fail untuk tidak menggangu monitoring
   }
 }
 
@@ -390,7 +503,8 @@ async function checkPriceUpdate() {
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 console.log(`✅ Real-time monitoring: every ${PRICE_CHECK_INTERVAL/1000}s`)
 console.log(`⏱️  Debounce: ${DEBOUNCE_TIME/1000}s (wait for stable price)`)
-console.log(`📊 Min change: ±Rp${MIN_PRICE_CHANGE} (ignore small fluctuations)\n`)
+console.log(`📊 Min change: ±Rp${MIN_PRICE_CHANGE}`)
+console.log(`⏰ Min broadcast interval: ${MIN_BROADCAST_INTERVAL/1000}s\n`)
 
 // ------ EXPRESS ------
 const app = express()
@@ -417,11 +531,15 @@ app.get('/stats', (_req, res) => {
     subs: subscriptions.size,
     lastPrice: lastKnownPrice,
     lastBroadcasted: lastBroadcastedPrice,
+    broadcastCount: broadcastCount,
     interval: `${PRICE_CHECK_INTERVAL/1000}s`,
     debounce: `${DEBOUNCE_TIME/1000}s`,
     minChange: `Rp${MIN_PRICE_CHANGE}`,
+    minBroadcastInterval: `${MIN_BROADCAST_INTERVAL/1000}s`,
     pendingBroadcast: !!pendingBroadcast,
-    logs: logs.slice(-15)
+    isBroadcasting: isBroadcasting,
+    lastBroadcastTime: lastBroadcastTime ? new Date(lastBroadcastTime).toISOString() : null,
+    logs: logs.slice(-20)
   })
 })
 
@@ -517,14 +635,14 @@ async function start() {
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update real-time (cek 2s, broadcast setelah stabil 5s, min perubahan ±Rp50).\n\n_Ketik "berhenti" untuk stop._'
+              text: '✅ Sudah berlangganan!\n\n📢 Update real-time:\n• Cek 2s\n• Broadcast stabil 5s\n• Min ±Rp50\n• Interval 10s\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
-            pushLog(`+ ${sendTarget.substring(0, 15)}`)
+            pushLog(`+ ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 *Langganan Berhasil!*\n\n📢 Update INSTANT saat harga berubah!\n\n✅ Cek setiap 2 detik\n✅ Broadcast setelah stabil 5 detik\n✅ Min perubahan ±Rp50\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 *Langganan Berhasil!*\n\n📢 Update INSTANT saat harga berubah!\n\n✅ Cek setiap 2 detik\n✅ Broadcast setelah stabil 5 detik\n✅ Min perubahan ±Rp50\n✅ Min interval 10 detik\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
@@ -534,7 +652,7 @@ async function start() {
         if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             subscriptions.delete(sendTarget)
-            pushLog(`- ${sendTarget.substring(0, 15)}`)
+            pushLog(`- ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             await sock.sendMessage(sendTarget, { text: '👋 Langganan dihentikan.' }, { quoted: msg })
           } else {
             await sock.sendMessage(sendTarget, { text: '❌ Belum berlangganan.' }, { quoted: msg })
@@ -565,7 +683,7 @@ async function start() {
           ])
           replyText = formatMessage(treasury, usdIdr)
         } catch (e) {
-          replyText = '❌ Gagal.'
+          replyText = '❌ Gagal mengambil data harga.'
         }
 
         await new Promise(r => setTimeout(r, Math.floor(Math.random() * 500) + 500))
@@ -582,7 +700,7 @@ async function start() {
         await new Promise(r => setTimeout(r, 1000))
         
       } catch (e) {
-        console.error(e.message)
+        pushLog(`Error: ${e.message}`)
       }
     }
   })
