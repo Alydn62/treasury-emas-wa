@@ -8,7 +8,6 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys'
 import pino from 'pino'
 import express from 'express'
-import NodeCache from 'node-cache'
 
 // ------ CONFIG ------
 const PORT = process.env.PORT || 8000
@@ -16,11 +15,16 @@ const TREASURY_URL = process.env.TREASURY_URL ||
   'https://api.treasury.id/api/v1/antigrvty/gold/rate'
 
 // Anti-spam settings
-const COOLDOWN_PER_CHAT = 60000 // 1 menit per chat
-const GLOBAL_THROTTLE = 3000 // 3 detik antar pesan
-const TYPING_DURATION = 6000 // 6 detik typing
-const RANDOM_DELAY_MIN = 2000 // Min 2 detik
-const RANDOM_DELAY_MAX = 5000 // Max 5 detik
+const COOLDOWN_PER_CHAT = 60000 // 1 menit
+const GLOBAL_THROTTLE = 3000
+const TYPING_DURATION = 6000
+const RANDOM_DELAY_MIN = 2000
+const RANDOM_DELAY_MAX = 5000
+
+// Reconnect settings
+let reconnectAttempts = 0
+const MAX_RECONNECT_ATTEMPTS = 10
+const BASE_RECONNECT_DELAY = 5000
 
 // ------ STATE ------
 let lastQr = null
@@ -29,7 +33,6 @@ const processedMsgIds = new Set()
 const lastReplyAtPerChat = new Map()
 let lastGlobalReplyAt = 0
 let isReady = false
-const msgRetryCounterCache = new NodeCache()
 
 function pushLog(s) {
   logs.push(`${new Date().toISOString()} ${s}`)
@@ -42,7 +45,6 @@ setInterval(() => {
     const toKeep = idsArray.slice(-1000)
     processedMsgIds.clear()
     toKeep.forEach(id => processedMsgIds.add(id))
-    pushLog(`Cleaned message IDs`)
   }
 }, 30 * 60 * 1000)
 
@@ -120,7 +122,6 @@ function calculateProfit(buyRate, sellRate, investmentAmount) {
   }
 }
 
-// Fetch USD/IDR dari Google Finance
 async function fetchUSDIDRFromGoogle() {
   try {
     const url = 'https://www.google.com/finance/quote/USD-IDR'
@@ -164,13 +165,11 @@ async function fetchUSDIDRFromGoogle() {
   }
 }
 
-// Format pesan
 function formatMessage(treasuryData, usdIdrData) {
   const buy = treasuryData?.data?.buying_rate || 0
   const sell = treasuryData?.data?.selling_rate || 0
   const updated = treasuryData?.data?.updated_at || new Date().toISOString()
   
-  const dateStr = updated.split('T')[0] || ''
   const timeStr = updated.split('T')[1]?.substring(0, 5) || ''
   
   const usdIdrRate = usdIdrData.rate
@@ -182,43 +181,26 @@ function formatMessage(treasuryData, usdIdrData) {
   const spread = sell - buy
   const spreadPercent = ((spread / buy) * 100).toFixed(2)
   
-  return `✨ *HARGA EMAS HARI INI* ✨
-📅 ${dateStr} ${timeStr} WIB
+  return `💎 *HARGA EMAS TREASURY* 💎
+⏰ ${timeStr} WIB
 
-━━━━━━━━━━━━━━━━━━━━━
-💰 *HARGA TREASURY INDONESIA*
+┏━━━━━━━━━━━━━━━━━━━
+┣ 📊 *Beli:* Rp${formatRupiah(buy)}/gr
+┣ 📊 *Jual:* Rp${formatRupiah(sell)}/gr
+┣ 📉 *Spread:* Rp${formatRupiah(spread)} (${spreadPercent}%)
+┗━━━━━━━━━━━━━━━━━━━
 
-📊 Beli Emas:
-   Rp${formatRupiah(buy)}/gram
-
-📊 Jual Emas:
-   Rp${formatRupiah(sell)}/gram
-
-📉 Spread: Rp${formatRupiah(spread)} (${spreadPercent}%)
-
-━━━━━━━━━━━━━━━━━━━━━
-💵 Kurs USD/IDR:
-   Rp${formatRupiah(Math.round(usdIdrRate))}
-   ${usdIdrSign}Rp${formatRupiah(Math.abs(Math.round(usdIdrChange)))} (${usdIdrSign}${Math.abs(usdIdrChangePercent).toFixed(2)}%) ${usdIdrEmoji}
-
-━━━━━━━━━━━━━━━━━━━━━
-🎁 *SIMULASI DISKON TREASURY*
-(Diskon hingga Rp1.020.000)
+💵 *USD/IDR:* Rp${formatRupiah(Math.round(usdIdrRate))} ${usdIdrSign}${Math.abs(usdIdrChangePercent).toFixed(2)}% ${usdIdrEmoji}
 
 ${generateDiscountSimulation(buy, sell)}
 
-━━━━━━━━━━━━━━━━━━━━━
-⏱️ _Bot akan reply 1x per 1 menit_
-📊 _Data real-time_`
+⚡ _Reply max 1x/menit • Data real-time_`
 }
 
 function generateDiscountSimulation(buy, sell) {
   const amounts = [
-    { value: 250000, label: '250rb' },
-    { value: 5000000, label: '5jt' },
-    { value: 10000000, label: '10jt' },
-    { value: 20000000, label: '20jt' },
-    { value: 30000000, label: '30jt' }
+    { value: 20000000, label: '20 Juta' },
+    { value: 30000000, label: '30 Juta' }
   ]
   
   return amounts.map(({ value, label }) => {
@@ -233,12 +215,10 @@ function generateDiscountSimulation(buy, sell) {
     
     const profitSign = calc.profit >= 0 ? '+' : ''
     
-    return `💰 *Nominal ${label}*
-   Harga: Rp${formatRupiah(value)}
-   Diskon: Rp${formatRupiah(Math.round(calc.discountAmount))}
-   Bayar: Rp${formatRupiah(Math.round(calc.discountedPrice))}
-   Dapat: ${calc.totalGrams.toFixed(4)} gram
-   Profit: ${profitSign}Rp${formatRupiah(Math.round(calc.profit))} ${emoji}`
+    return `🎁 *${label}*
+├ Bayar: Rp${formatRupiah(Math.round(calc.discountedPrice))}
+├ Dapat: ${calc.totalGrams.toFixed(4)} gram
+└ Profit: ${profitSign}Rp${formatRupiah(Math.round(calc.profit))} ${emoji}`
   }).join('\n\n')
 }
 
@@ -301,6 +281,7 @@ app.get('/stats', (_req, res) => {
     uptime: Math.floor(process.uptime()),
     totalChats: lastReplyAtPerChat.size,
     processedMessages: processedMsgIds.size,
+    reconnectAttempts,
     activeChats: Array.from(lastReplyAtPerChat.entries())
       .slice(-10)
       .map(([chat, lastTime]) => ({
@@ -355,14 +336,12 @@ async function start() {
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 30000,
     connectTimeoutMs: 60000,
-    msgRetryCounterCache,
     generateHighQualityLinkPreview: false,
     getMessage: async (key) => {
       return { conversation: '' }
     }
   })
 
-  // Keep alive ping
   setInterval(() => {
     if (sock && sock.ws && sock.ws.readyState === 1) {
       sock.ws.ping()
@@ -374,43 +353,55 @@ async function start() {
     
     if (qr) {
       lastQr = qr
-      console.log('📲 QR code ready - Open /qr to scan')
+      console.log('📲 QR ready - Open /qr')
       pushLog('QR generated')
     }
     
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode
-      
-      console.log('❌ Connection closed:', reason)
+      console.log(`❌ Connection closed: ${reason}`)
       pushLog(`Closed: ${reason}`)
       
-      // PENTING: Jangan reconnect jika logout
+      // HANYA jangan reconnect jika BENAR-BENAR logout
       if (reason === DisconnectReason.loggedOut) {
-        console.log('⚠️  LOGGED OUT - Silakan scan QR lagi di /qr')
-        pushLog('LOGGED OUT - Manual QR scan required')
+        console.log('⚠️  LOGGED OUT - Scan QR at /qr')
+        pushLog('LOGGED OUT - need QR scan')
         lastQr = null
-        return // STOP - tidak reconnect
+        reconnectAttempts = 0
+        return
       }
       
-      // PENTING: Jangan reconnect untuk error lain juga
-      console.log('⚠️  Connection lost - Silakan restart bot atau scan QR lagi')
-      pushLog('Connection lost - Manual restart required')
-      return // STOP - tidak reconnect otomatis
+      // Untuk error lain (termasuk 515), coba reconnect
+      if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        const delay = BASE_RECONNECT_DELAY * Math.pow(1.5, reconnectAttempts)
+        reconnectAttempts++
+        console.log(`🔄 Reconnecting in ${Math.round(delay/1000)}s (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
+        pushLog(`Reconnect attempt ${reconnectAttempts}`)
+        
+        setTimeout(() => {
+          console.log('🔄 Attempting reconnect...')
+          start()
+        }, delay)
+      } else {
+        console.log('❌ Max reconnect attempts reached')
+        pushLog('Max reconnect attempts')
+        process.exit(1)
+      }
       
     } else if (connection === 'open') {
       lastQr = null
-      console.log('✅ WhatsApp connected!')
+      reconnectAttempts = 0 // Reset counter saat berhasil connect
+      console.log('✅ Connected!')
       pushLog('Connected')
       
       isReady = false
       console.log('⏳ Warmup 20s...')
-      pushLog('Warmup started')
       
       setTimeout(() => {
         isReady = true
-        console.log('🟢 Bot ready!')
-        pushLog('Bot ready')
-      }, 20000) // 20 detik warmup
+        console.log('🟢 Ready!')
+        pushLog('Ready')
+      }, 20000)
     }
   })
 
@@ -434,26 +425,22 @@ async function start() {
         const sendTarget = msg.key.remoteJid
         const now = Date.now()
         
-        // Cooldown 1 menit
         const lastReply = lastReplyAtPerChat.get(sendTarget) || 0
         if (now - lastReply < COOLDOWN_PER_CHAT) {
-          pushLog(`Cooldown active for ${sendTarget}`)
+          pushLog(`Cooldown: ${sendTarget}`)
           continue
         }
         
-        // Global throttle
         if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) continue
 
         pushLog(`Processing: ${sendTarget}`)
 
-        // Typing
         try {
           await sock.sendPresenceUpdate('composing', sendTarget)
         } catch (_) {}
         
         await new Promise(r => setTimeout(r, TYPING_DURATION))
 
-        // Fetch data (tanpa XAU/USD)
         let replyText
         try {
           const [treasury, usdIdr] = await Promise.all([
@@ -462,22 +449,19 @@ async function start() {
           ])
           
           replyText = formatMessage(treasury, usdIdr)
-          pushLog('Data fetched')
+          pushLog('Fetched')
         } catch (e) {
-          replyText = '❌ Maaf, gagal mengambil data harga emas.\n\n⏱️ Silakan coba lagi dalam beberapa saat.'
+          replyText = '❌ Gagal mengambil data.\n⏱️ Coba lagi nanti.'
           pushLog(`Error: ${e.message}`)
         }
 
-        // Random delay
         const randomDelay = Math.floor(Math.random() * (RANDOM_DELAY_MAX - RANDOM_DELAY_MIN)) + RANDOM_DELAY_MIN
         await new Promise(r => setTimeout(r, randomDelay))
         
-        // Stop typing
         try {
           await sock.sendPresenceUpdate('paused', sendTarget)
         } catch (_) {}
         
-        // Send
         await sock.sendMessage(
           sendTarget,
           { text: replyText },
@@ -502,7 +486,7 @@ async function start() {
 }
 
 start().catch((e) => {
-  console.error('Fatal error:', e)
+  console.error('Fatal:', e)
   pushLog(`Fatal: ${e.message}`)
   process.exit(1)
 })
