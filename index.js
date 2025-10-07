@@ -17,13 +17,14 @@ const TREASURY_URL = process.env.TREASURY_URL ||
 // Anti-spam settings
 const COOLDOWN_PER_CHAT = 60000
 const GLOBAL_THROTTLE = 3000
-const TYPING_DURATION = 6000
-const RANDOM_DELAY_MIN = 2000
-const RANDOM_DELAY_MAX = 5000
+const TYPING_DURATION = 2000 // 2 detik
+const RANDOM_DELAY_MIN = 500
+const RANDOM_DELAY_MAX = 1000
 
-// Price monitoring settings - 50 detik untuk hemat CPU
-const PRICE_CHECK_INTERVAL = 50000 // 50 detik
+// REAL-TIME: Cek setiap 2 detik
+const PRICE_CHECK_INTERVAL = 2000
 let lastKnownPrice = null
+let isBroadcasting = false
 
 // Reconnect settings
 let reconnectAttempts = 0
@@ -39,25 +40,22 @@ let lastGlobalReplyAt = 0
 let isReady = false
 let sock = null
 
-// Subscription state
 const subscriptions = new Set()
 
 function pushLog(s) {
-  const logMsg = `${new Date().toISOString()} ${s}`
+  const logMsg = `${new Date().toISOString().substring(11, 19)} ${s}`
   logs.push(logMsg)
+  if (logs.length > 20) logs.shift()
   console.log(logMsg)
-  if (logs.length > 50) logs.splice(0, logs.length - 50)
 }
 
-// Cleanup memory setiap jam
 setInterval(() => {
-  if (processedMsgIds.size > 1000) {
-    const idsArray = Array.from(processedMsgIds)
-    const toKeep = idsArray.slice(-500)
+  if (processedMsgIds.size > 300) {
+    const arr = Array.from(processedMsgIds).slice(-200)
     processedMsgIds.clear()
-    toKeep.forEach(id => processedMsgIds.add(id))
+    arr.forEach(id => processedMsgIds.add(id))
   }
-}, 60 * 60 * 1000)
+}, 5 * 60 * 1000)
 
 // ------ UTIL ------
 function normalizeText(msg) {
@@ -142,64 +140,45 @@ function calculateProfit(buyRate, sellRate, investmentAmount) {
 async function fetchUSDIDRFallback() {
   try {
     const res = await fetch('https://api.exchangerate-api.com/v4/latest/USD', {
-      signal: AbortSignal.timeout(5000) // 5 detik timeout
+      signal: AbortSignal.timeout(2000)
     })
     if (res.ok) {
       const json = await res.json()
-      const rate = json.rates?.IDR || 0
-      
-      if (rate > 1000 && rate < 50000) {
-        return { rate, change: 0, changePercent: 0 }
-      }
+      return { rate: json.rates?.IDR || 15750, change: 0, changePercent: 0 }
     }
-  } catch (e) {
-    console.error('Fallback API error:', e.message)
-  }
-  
+  } catch (_) {}
   return { rate: 15750, change: 0, changePercent: 0 }
 }
 
 async function fetchUSDIDRFromGoogle() {
   try {
     const res = await fetch('https://www.google.com/finance/quote/USD-IDR', {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      signal: AbortSignal.timeout(5000) // 5 detik timeout
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      signal: AbortSignal.timeout(2000)
     })
     
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (!res.ok) return await fetchUSDIDRFallback()
     
     const html = await res.text()
-    
     let rateMatch = html.match(/class="YMlKec fxKbKc"[^>]*>([0-9,\.]+)<\/div>/i)
-    if (!rateMatch) rateMatch = html.match(/data-last-price="([0-9,\.]+)"/i)
     if (!rateMatch) rateMatch = html.match(/class="[^"]*fxKbKc[^"]*"[^>]*>([0-9,\.]+)<\/div>/i)
     
-    if (rateMatch && rateMatch[1]) {
+    if (rateMatch?.[1]) {
       const rate = parseFloat(rateMatch[1].replace(/,/g, ''))
-      
       if (rate > 1000 && rate < 50000) {
-        let change = 0
-        let changePercent = 0
-        
+        let change = 0, changePercent = 0
         const changeMatch = html.match(/class="[^"]*P2Luy[^"]*"[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i)
         if (changeMatch) {
           change = parseFloat(changeMatch[1].replace(/,/g, ''))
           changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
         }
-        
         return { rate, change, changePercent }
       }
     }
-    
-    throw new Error('Parse failed')
-  } catch (e) {
-    return await fetchUSDIDRFallback()
-  }
+  } catch (_) {}
+  return await fetchUSDIDRFallback()
 }
 
-// FORMAT MESSAGE dengan indikator naik/turun
 function formatMessage(treasuryData, usdIdrData, priceChange = null) {
   const buy = treasuryData?.data?.buying_rate || 0
   const sell = treasuryData?.data?.selling_rate || 0
@@ -216,7 +195,6 @@ function formatMessage(treasuryData, usdIdrData, priceChange = null) {
   const spread = sell - buy
   const spreadPercent = ((spread / buy) * 100).toFixed(2)
   
-  // Indikator perubahan harga
   let priceIndicator = ''
   if (priceChange) {
     if (priceChange.buyChange > 0 || priceChange.sellChange > 0) {
@@ -239,7 +217,7 @@ function formatMessage(treasuryData, usdIdrData, priceChange = null) {
 
 ${generateDiscountSimulation(buy, sell)}
 
-⚡ _Update otomatis saat harga berubah_`
+⚡ _Update real-time saat harga berubah_`
 }
 
 function generateDiscountSimulation(buy, sell) {
@@ -268,41 +246,28 @@ function generateDiscountSimulation(buy, sell) {
 }
 
 async function fetchTreasury() {
-  try {
-    const res = await fetch(TREASURY_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(5000) // 5 detik timeout
-    })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const json = await res.json()
-    if (!json?.data?.buying_rate || !json?.data?.selling_rate) {
-      throw new Error('Invalid data')
-    }
-    return json
-  } catch (e) {
-    throw e
+  const res = await fetch(TREASURY_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(2000)
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const json = await res.json()
+  if (!json?.data?.buying_rate || !json?.data?.selling_rate) {
+    throw new Error('Invalid data')
   }
+  return json
 }
 
-// ------ SUBSCRIPTION BROADCAST ------
-async function broadcastToSubscribers(priceChange = null) {
-  const now = new Date()
-  const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
-  
-  console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`)
-  console.log(`🔔 BROADCAST TRIGGERED at ${timeStr}`)
-  console.log(`📊 Subscribers: ${subscriptions.size}`)
-  
-  if (priceChange) {
-    console.log(`📈 Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)}`)
-    console.log(`📈 Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
-  }
-  
-  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`)
+// ------ INSTANT BROADCAST ------
+async function broadcastToSubscribers(priceChange) {
+  if (isBroadcasting) return
+  isBroadcasting = true
 
+  const time = new Date().toISOString().substring(11, 19)
+  
   if (!sock || !isReady || subscriptions.size === 0) {
-    console.log('❌ Broadcast skipped')
+    isBroadcasting = false
     return
   }
 
@@ -314,30 +279,29 @@ async function broadcastToSubscribers(priceChange = null) {
     
     const message = formatMessage(treasury, usdIdr, priceChange)
     
-    let successCount = 0
+    console.log(`📤 ${time} Broadcasting to ${subscriptions.size} subs`)
     
     for (const chatId of subscriptions) {
       try {
         await sock.sendMessage(chatId, { text: message })
-        successCount++
-        await new Promise(r => setTimeout(r, 2000))
+        await new Promise(r => setTimeout(r, 1000))
       } catch (e) {
-        console.log(`❌ Failed: ${chatId.substring(0, 20)}`)
+        console.log(`❌ Failed: ${chatId.substring(0, 15)}`)
       }
     }
     
-    console.log(`✅ Broadcast: ${successCount}/${subscriptions.size}\n`)
+    pushLog(`✅ Broadcast sent`)
     
   } catch (e) {
-    console.error('❌ Broadcast error:', e.message)
+    console.error('Broadcast error:', e.message)
   }
+  
+  isBroadcasting = false
 }
 
-// ------ PRICE MONITORING (50 detik) ------
+// ------ REAL-TIME PRICE MONITOR (2 detik) ------
 async function checkPriceUpdate() {
-  if (!isReady || subscriptions.size === 0) {
-    return
-  }
+  if (!isReady || subscriptions.size === 0) return
 
   try {
     const treasuryData = await fetchTreasury()
@@ -347,61 +311,55 @@ async function checkPriceUpdate() {
       updated_at: treasuryData?.data?.updated_at
     }
 
-    // Cek perubahan harga
     if (!lastKnownPrice) {
-      console.log('📊 First price check')
       lastKnownPrice = currentPrice
+      console.log(`📊 First check: Buy=${formatRupiah(currentPrice.buy)}, Sell=${formatRupiah(currentPrice.sell)}`)
     } else if (
       lastKnownPrice.buy !== currentPrice.buy || 
       lastKnownPrice.sell !== currentPrice.sell ||
       lastKnownPrice.updated_at !== currentPrice.updated_at
     ) {
-      // HARGA BERUBAH!
+      // HARGA BERUBAH - LANGSUNG BROADCAST!
       const priceChange = {
         buyChange: currentPrice.buy - lastKnownPrice.buy,
         sellChange: currentPrice.sell - lastKnownPrice.sell
       }
       
-      console.log('\n🔔 PRICE CHANGED!')
-      console.log(`Buy: ${formatRupiah(lastKnownPrice.buy)} → ${formatRupiah(currentPrice.buy)} (${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)})`)
-      console.log(`Sell: ${formatRupiah(lastKnownPrice.sell)} → ${formatRupiah(currentPrice.sell)} (${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)})`)
+      const time = new Date().toISOString().substring(11, 19)
+      const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
+      const sellIcon = priceChange.sellChange > 0 ? '📈' : '📉'
       
-      pushLog(`Price changed: Buy ${priceChange.buyChange > 0 ? '↑' : '↓'} Sell ${priceChange.sellChange > 0 ? '↑' : '↓'}`)
+      console.log(`\n🔔 ${time} PRICE CHANGED!`)
+      console.log(`${buyIcon} Buy: ${formatRupiah(lastKnownPrice.buy)} → ${formatRupiah(currentPrice.buy)} (${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)})`)
+      console.log(`${sellIcon} Sell: ${formatRupiah(lastKnownPrice.sell)} → ${formatRupiah(currentPrice.sell)} (${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)})\n`)
       
       lastKnownPrice = currentPrice
       
-      // Trigger broadcast
+      // LANGSUNG BROADCAST!
       await broadcastToSubscribers(priceChange)
-    } else {
-      console.log('✓ No change')
     }
   } catch (e) {
-    console.error('❌ Price check error:', e.message)
+    // Silent fail, retry di interval berikutnya
   }
 }
 
-// Start monitoring setiap 50 detik
+// Start monitoring setiap 2 detik
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
-console.log(`✅ Price monitoring: every ${PRICE_CHECK_INTERVAL/1000}s`)
+console.log(`✅ Real-time monitoring: every ${PRICE_CHECK_INTERVAL/1000}s\n`)
 
 // ------ EXPRESS ------
 const app = express()
 app.use(express.json())
 
-app.get('/', (_req, res) => {
-  res.send('✅ Bot Running')
-})
+app.get('/', (_req, res) => res.send('✅ Bot Running'))
 
 app.get('/qr', async (_req, res) => {
-  if (!lastQr) {
-    return res.send('<pre>QR belum siap\n\n✅ Bot running</pre>')
-  }
-
+  if (!lastQr) return res.send('<pre>QR not ready</pre>')
   try {
     const mod = await import('qrcode').catch(() => null)
     if (mod?.toDataURL) {
       const dataUrl = await mod.toDataURL(lastQr, { margin: 1 })
-      return res.send(`<div style="text-align:center;padding:20px"><h2>📱 Scan QR</h2><img src="${dataUrl}" style="max-width:400px"/></div>`)
+      return res.send(`<div style="text-align:center;padding:20px"><img src="${dataUrl}" style="max-width:400px"/></div>`)
     }
   } catch (_) {}
   res.send(lastQr)
@@ -409,47 +367,18 @@ app.get('/qr', async (_req, res) => {
 
 app.get('/stats', (_req, res) => {
   res.json({
-    status: isReady ? '🟢 Online' : '🔴 Warming',
+    status: isReady ? '🟢' : '🔴',
     uptime: Math.floor(process.uptime()),
-    subscribers: subscriptions.size,
-    lastPrice: lastKnownPrice ? {
-      buy: formatRupiah(lastKnownPrice.buy),
-      sell: formatRupiah(lastKnownPrice.sell),
-      updated: lastKnownPrice.updated_at
-    } : null,
-    checkInterval: `${PRICE_CHECK_INTERVAL/1000}s`,
-    logs: logs.slice(-10)
+    subs: subscriptions.size,
+    lastPrice: lastKnownPrice,
+    interval: `${PRICE_CHECK_INTERVAL/1000}s`,
+    logs: logs.slice(-15)
   })
 })
 
-app.get('/broadcast-now', async (_req, res) => {
-  await broadcastToSubscribers()
-  res.json({ ok: true })
-})
-
-app.get('/check-price', async (_req, res) => {
-  await checkPriceUpdate()
-  res.json({ ok: true, lastPrice: lastKnownPrice })
-})
-
-app.get('/test', async (_req, res) => {
-  try {
-    const [treasury, usdIdr] = await Promise.all([
-      fetchTreasury(),
-      fetchUSDIDRFromGoogle()
-    ])
-    const message = formatMessage(treasury, usdIdr)
-    res.type('text/plain').send(message)
-  } catch (e) {
-    res.status(500).send(`Error: ${e.message}`)
-  }
-})
-
 app.listen(PORT, () => {
-  console.log(`\n🌐 Server: http://localhost:${PORT}`)
-  console.log(`📊 Stats: /stats`)
-  console.log(`🔴 Broadcast: /broadcast-now`)
-  console.log(`🔍 Check: /check-price\n`)
+  console.log(`🌐 http://localhost:${PORT}`)
+  console.log(`📊 /stats | 🔴 /broadcast-now | 🔍 /check-price\n`)
 })
 
 // ------ WHATSAPP ------
@@ -457,23 +386,19 @@ async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth')
   const { version } = await fetchLatestBaileysVersion()
 
-  const logger = pino({ level: 'silent' })
-
   sock = makeWASocket({
     version,
-    logger,
+    logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger)
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
     },
     browser: Browsers.macOS('Desktop'),
     markOnlineOnConnect: false,
     syncFullHistory: false,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 30000,
-    connectTimeoutMs: 60000,
-    generateHighQualityLinkPreview: false,
     getMessage: async () => ({ conversation: '' })
   })
 
@@ -486,40 +411,38 @@ async function start() {
     
     if (qr) {
       lastQr = qr
-      console.log('📲 QR ready')
       pushLog('QR ready')
     }
     
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode
-      console.log(`❌ Closed: ${reason}`)
+      pushLog(`Closed: ${reason}`)
       
       if (reason === DisconnectReason.loggedOut) {
-        console.log('⚠️  LOGGED OUT')
-        lastQr = null
+        pushLog('LOGGED OUT')
         return
       }
       
       if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         const delay = BASE_RECONNECT_DELAY * Math.pow(1.5, reconnectAttempts)
         reconnectAttempts++
-        console.log(`🔄 Reconnect in ${Math.round(delay/1000)}s`)
+        pushLog(`Reconnect in ${Math.round(delay/1000)}s`)
         setTimeout(() => start(), delay)
       }
       
     } else if (connection === 'open') {
       lastQr = null
       reconnectAttempts = 0
-      console.log('✅ Connected')
+      pushLog('Connected')
       
       isReady = false
-      console.log('⏳ Warmup 20s')
+      pushLog('Warmup 15s')
       
       setTimeout(() => {
         isReady = true
-        console.log('🟢 Ready!')
+        pushLog('Ready!')
         checkPriceUpdate()
-      }, 20000)
+      }, 15000)
     }
   })
 
@@ -540,20 +463,19 @@ async function start() {
         if (!text) continue
 
         const sendTarget = msg.key.remoteJid
-        const isGroup = isGroupMessage(msg)
         
         // langganan
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah.\n\n_Ketik "berhenti" untuk stop._'
+              text: '✅ Sudah berlangganan!\n\n📢 Update real-time saat harga berubah (cek setiap 2 detik).\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
-            console.log(`➕ New: ${sendTarget.substring(0, 20)} (${isGroup ? 'GROUP' : 'DM'})`)
+            pushLog(`+ ${sendTarget.substring(0, 15)}`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 *Langganan Berhasil!*\n\n📢 Update otomatis saat harga berubah (cek setiap 50 detik).\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 *Langganan Berhasil!*\n\n📢 Anda akan dapat update INSTANT saat harga berubah!\n\n_Bot cek harga setiap 2 detik untuk update real-time._\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
@@ -563,14 +485,14 @@ async function start() {
         if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             subscriptions.delete(sendTarget)
-            console.log(`➖ Unsub: ${sendTarget.substring(0, 20)}`)
+            pushLog(`- ${sendTarget.substring(0, 15)}`)
             
             await sock.sendMessage(sendTarget, {
-              text: '👋 Langganan dihentikan.\n\n_Ketik "langganan" untuk mulai lagi._'
+              text: '👋 Langganan dihentikan.'
             }, { quoted: msg })
           } else {
             await sock.sendMessage(sendTarget, {
-              text: '❌ Belum berlangganan.\n\n_Ketik "langganan" untuk mulai._'
+              text: '❌ Belum berlangganan.'
             }, { quoted: msg })
           }
           continue
@@ -582,13 +504,8 @@ async function start() {
         const now = Date.now()
         const lastReply = lastReplyAtPerChat.get(sendTarget) || 0
         
-        if (now - lastReply < COOLDOWN_PER_CHAT) {
-          continue
-        }
-        
-        if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) {
-          continue
-        }
+        if (now - lastReply < COOLDOWN_PER_CHAT) continue
+        if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) continue
 
         try {
           await sock.sendPresenceUpdate('composing', sendTarget)
@@ -604,11 +521,10 @@ async function start() {
           ])
           replyText = formatMessage(treasury, usdIdr)
         } catch (e) {
-          replyText = '❌ Gagal mengambil data.\n⏱️ Coba lagi.'
+          replyText = '❌ Gagal.'
         }
 
-        const randomDelay = Math.floor(Math.random() * (RANDOM_DELAY_MAX - RANDOM_DELAY_MIN)) + RANDOM_DELAY_MIN
-        await new Promise(r => setTimeout(r, randomDelay))
+        await new Promise(r => setTimeout(r, Math.floor(Math.random() * 500) + 500))
         
         try {
           await sock.sendPresenceUpdate('paused', sendTarget)
@@ -619,17 +535,16 @@ async function start() {
         lastReplyAtPerChat.set(sendTarget, now)
         lastGlobalReplyAt = now
         
-        console.log(`✅ Sent`)
-        await new Promise(r => setTimeout(r, 2000))
+        await new Promise(r => setTimeout(r, 1000))
         
       } catch (e) {
-        console.error('Error:', e.message)
+        console.error(e.message)
       }
     }
   })
 }
 
-start().catch((e) => {
+start().catch(e => {
   console.error('Fatal:', e)
   process.exit(1)
 })
