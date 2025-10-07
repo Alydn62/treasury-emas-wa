@@ -732,7 +732,30 @@ async function start() {
           ])
           replyText = formatMessage(treasury, usdIdr.rate, xauUsd, null)
         } catch (e) {
-          replyText = '❌ Gagal mengambil data harga.'
+replyText = '❌ Gagal mengambil data harga.'
         }
 
-        await new Promise(r => setTimeout(
+        await new Promise(r => setTimeout(r, 500))
+        
+        try {
+          await sock.sendPresenceUpdate('paused', sendTarget)
+        } catch (_) {}
+        
+        await sock.sendMessage(sendTarget, { text: replyText }, { quoted: msg })
+
+        lastReplyAtPerChat.set(sendTarget, now)
+        lastGlobalReplyAt = now
+        
+        await new Promise(r => setTimeout(r, 1000))
+        
+      } catch (e) {
+        pushLog(`Error: ${e.message}`)
+      }
+    }
+  })
+}
+
+start().catch(e => {
+  console.error('Fatal:', e)
+  process.exit(1)
+})
