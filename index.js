@@ -19,9 +19,9 @@ const COOLDOWN_PER_CHAT = 60000
 const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
 
-// INSTANT BROADCAST - Kirim 1 detik setelah deteksi perubahan harga
+// SMART BROADCAST - Kumpulkan perubahan, kirim 1x per menit
 const PRICE_CHECK_INTERVAL = 1000    // Cek setiap 1 detik
-const BROADCAST_DELAY = 1000         // Delay 1 detik setelah deteksi perubahan
+const BROADCAST_INTERVAL = 60000     // Kirim broadcast setiap 1 menit
 const MIN_PRICE_CHANGE = 1           // Skip perubahan < Rp1
 
 // Konversi troy ounce ke gram
@@ -35,6 +35,8 @@ let lastKnownPrice = null
 let lastBroadcastedPrice = null
 let isBroadcasting = false
 let broadcastCount = 0
+let priceChangePending = false
+let lastBroadcastTime = 0
 
 // Reconnect settings
 let reconnectAttempts = 0
@@ -462,9 +464,9 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
   let headerSection = ''
   if (priceChange && priceChange.buyChange !== 0) {
     if (priceChange.buyChange > 0) {
-      headerSection = 'HARGA NAIK 🚀🚀🚀🚀\n'
+      headerSection = 'HARGA NAIK 🚀\n'
     } else {
-      headerSection = 'HARGA TURUN 🔻🔻🔻🔻\n'
+      headerSection = 'HARGA TURUN 🔻\n'
     }
   }
   
@@ -557,7 +559,10 @@ async function doBroadcast(priceChange) {
       }
     }
     
+    lastBroadcastTime = Date.now()
     pushLog(`✅ [#${currentBroadcastId}] Sent: ${successCount}, Failed: ${failCount}`)
+    
+    priceChangePending = false
     
   } catch (e) {
     pushLog(`❌ Broadcast error: ${e.message}`)
@@ -589,11 +594,6 @@ async function checkPriceUpdate() {
     
     if (!buyChanged && !sellChanged) return
     
-    const priceChange = {
-      buyChange: currentPrice.buy - lastKnownPrice.buy,
-      sellChange: currentPrice.sell - lastKnownPrice.sell
-    }
-    
     // SMART FILTER: Skip perubahan < Rp1
     const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
     const sellChangeSinceBroadcast = Math.abs(currentPrice.sell - (lastBroadcastedPrice?.sell || currentPrice.sell))
@@ -601,6 +601,11 @@ async function checkPriceUpdate() {
     if (buyChangeSinceBroadcast < MIN_PRICE_CHANGE && sellChangeSinceBroadcast < MIN_PRICE_CHANGE) {
       lastKnownPrice = currentPrice
       return
+    }
+    
+    const priceChange = {
+      buyChange: currentPrice.buy - lastKnownPrice.buy,
+      sellChange: currentPrice.sell - lastKnownPrice.sell
     }
     
     lastKnownPrice = currentPrice
@@ -611,17 +616,8 @@ async function checkPriceUpdate() {
     
     pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
     
-    // ⚡ INSTANT BROADCAST - Tunggu 1 detik lalu kirim
-    pushLog(`⏳ Waiting ${BROADCAST_DELAY/1000}s before broadcast...`)
-    await new Promise(r => setTimeout(r, BROADCAST_DELAY))
-    
-    if (!isBroadcasting) {
-      const finalPriceChange = {
-        buyChange: currentPrice.buy - lastBroadcastedPrice.buy,
-        sellChange: currentPrice.sell - lastBroadcastedPrice.sell
-      }
-      await doBroadcast(finalPriceChange)
-    }
+    // SET FLAG: Ada perubahan harga, tunggu broadcast interval
+    priceChangePending = true
     
   } catch (e) {
     // Silent fail
@@ -631,8 +627,18 @@ async function checkPriceUpdate() {
 // Cek harga setiap 1 detik
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 
-console.log(`✅ Instant Broadcast: ${BROADCAST_DELAY/1000}s delay after price change`)
-console.log(`📊 Price check interval: ${PRICE_CHECK_INTERVAL/1000}s`)
+// Broadcast setiap 1 menit HANYA jika ada perubahan harga
+setInterval(async () => {
+  if (priceChangePending && !isBroadcasting) {
+    const priceChange = {
+      buyChange: lastKnownPrice.buy - lastBroadcastedPrice.buy,
+      sellChange: lastKnownPrice.sell - lastBroadcastedPrice.sell
+    }
+    await doBroadcast(priceChange)
+  }
+}, BROADCAST_INTERVAL)
+
+console.log(`✅ Smart Broadcast: Check every ${PRICE_CHECK_INTERVAL/1000}s, Send every ${BROADCAST_INTERVAL/1000}s`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`🌍 XAU/USD: TradingView → Investing → Google\n`)
 
@@ -661,6 +667,7 @@ app.get('/stats', (_req, res) => {
     lastPrice: lastKnownPrice,
     lastBroadcasted: lastBroadcastedPrice,
     broadcastCount: broadcastCount,
+    priceChangePending: priceChangePending,
     logs: logs.slice(-20)
   })
 })
@@ -710,7 +717,7 @@ async function start() {
     getMessage: async () => ({ conversation: '' })
   })
 
-  setInterval(() => {
+setInterval(() => {
     if (sock?.ws?.readyState === 1) sock.ws.ping()
   }, 30000)
 
@@ -726,7 +733,7 @@ async function start() {
       const reason = lastDisconnect?.error?.output?.statusCode
       pushLog(`Closed: ${reason}`)
       
-if (reason === DisconnectReason.loggedOut) {
+      if (reason === DisconnectReason.loggedOut) {
         pushLog('LOGGED OUT')
         return
       }
@@ -775,14 +782,14 @@ if (reason === DisconnectReason.loggedOut) {
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update real-time otomatis'
+              text: '✅ Sudah berlangganan!\n\n📢 Update real-time otomatis setiap 1 menit'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`+ ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis setiap 1 menit jika ada perubahan harga\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
