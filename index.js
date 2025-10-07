@@ -755,7 +755,22 @@ async function checkPriceUpdate() {
       const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
       const sellIcon = priceChange.sellChange > 0 ? '📈' : '📉'
       
-pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
+      pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)} (⏳ Wait ${Math.round((BROADCAST_COOLDOWN - timeSinceLastBroadcast)/1000)}s)`)
+      return
+    }
+    
+    const priceChange = {
+      buyChange: currentPrice.buy - lastKnownPrice.buy,
+      sellChange: currentPrice.sell - lastKnownPrice.sell
+    }
+    
+    lastKnownPrice = currentPrice
+    
+    const time = new Date().toISOString().substring(11, 19)
+    const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
+    const sellIcon = priceChange.sellChange > 0 ? '📈' : '📉'
+    
+    pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
     
     lastBroadcastTime = now
     
