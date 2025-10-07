@@ -189,7 +189,53 @@ async function fetchUSDIDRFromGoogle() {
 }
 
 async function fetchXAUUSD() {
-  // Method 1: Scrape dari Google Finance
+  // Method 1: Scrape dari Investing.com dengan struktur yang benar
+  try {
+    const res = await fetch('https://www.investing.com/currencies/xau-usd', {
+      headers: { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5'
+      },
+      signal: AbortSignal.timeout(5000)
+    })
+    
+    if (res.ok) {
+      const html = await res.text()
+      
+      // Pattern dari screenshot Investing.com: 3,965.73
+      // Cari harga utama
+      let priceMatch = html.match(/([0-9]{1},[0-9]{3}\.[0-9]{2})\s*<\/span>/i)
+      if (!priceMatch) {
+        priceMatch = html.match(/"last[Pp]rice"[^>]*>([0-9,\.]+)</i)
+      }
+      if (!priceMatch) {
+        priceMatch = html.match(/data-test="instrument-price-last"[^>]*>([0-9,\.]+)</i)
+      }
+      
+      if (priceMatch?.[1]) {
+        const price = parseFloat(priceMatch[1].replace(/,/g, ''))
+        
+        if (price > 1000 && price < 10000) {
+          let change = 0, changePercent = 0
+          
+          // Cari perubahan: +4.68 (+0.12%)
+          const changeMatch = html.match(/([+-]?[0-9,\.]+)\s*\(([+-]?[0-9,\.]+)%\)/i)
+          if (changeMatch) {
+            change = parseFloat(changeMatch[1].replace(/,/g, ''))
+            changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
+          }
+          
+          console.log(`✅ XAU/USD from Investing.com: $${price} (${changePercent >= 0 ? '+' : ''}${changePercent}%)`)
+          return { price, change, changePercent }
+        }
+      }
+    }
+  } catch (e) {
+    console.log('Investing.com fetch error:', e.message)
+  }
+  
+  // Method 2: Fallback ke Google Finance
   try {
     const res = await fetch('https://www.google.com/finance/quote/XAU-USD', {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
@@ -210,15 +256,36 @@ async function fetchXAUUSD() {
             change = parseFloat(changeMatch[1].replace(/,/g, ''))
             changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
           }
+          console.log(`✅ XAU/USD from Google Finance: $${price} (${changePercent >= 0 ? '+' : ''}${changePercent}%)`)
           return { price, change, changePercent }
         }
       }
     }
   } catch (e) {
-    console.log('XAU/USD fetch error:', e.message)
+    console.log('Google Finance fetch error:', e.message)
   }
   
-  // Fallback: return default
+  // Method 3: Gunakan API metals-api.com (free tier)
+  try {
+    const res = await fetch('https://metals-api.com/api/latest?access_key=YOUR_API_KEY&base=USD&symbols=XAU', {
+      signal: AbortSignal.timeout(3000)
+    })
+    
+    if (res.ok) {
+      const json = await res.json()
+      if (json?.rates?.XAU) {
+        // Metals API returns inverse (USD per ounce of gold), so we need to inverse it
+        const price = 1 / json.rates.XAU
+        console.log(`✅ XAU/USD from Metals API: $${price.toFixed(2)}`)
+        return { price, change: 0, changePercent: 0 }
+      }
+    }
+  } catch (e) {
+    console.log('Metals API fetch error:', e.message)
+  }
+  
+  // Last fallback
+  console.log('⚠️  Using XAU/USD fallback value')
   return { price: 2650, change: 0, changePercent: 0 }
 }
 
@@ -606,7 +673,8 @@ async function start() {
             pushLog(`+ ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 *Langganan Berhasil!*\n\n📢 Update INSTANT saat harga berubah!\n\n✅ Cek setiap 2 detik\n✅ Broadcast setelah stabil 5 detik\n✅ Min perubahan ±Rp50\n✅ Min interval 10 detik\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 *Langganan Berhasil!*\n\n📢 Update INSTANT saat harga berubah!\n\n✅ Cek setiap 2 detik\n✅ Broadcast setelah stabil 5 detik\n✅ Min perubahan ±Rp50\n✅ Min interval 10 detik\n\n_Ketik "berhenti" untuk stop
+                ._'
             }, { quoted: msg })
           }
           continue
