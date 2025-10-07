@@ -19,10 +19,10 @@ const COOLDOWN_PER_CHAT = 60000
 const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
 
-// SCHEDULED BROADCAST - Kirim setiap 1 menit
+// INSTANT BROADCAST - Kirim 1 detik setelah deteksi perubahan harga
 const PRICE_CHECK_INTERVAL = 1000    // Cek setiap 1 detik
-const BROADCAST_SCHEDULE = 60000     // Broadcast TEPAT setiap 1 menit
-const MIN_PRICE_CHANGE = 1          // Skip perubahan < Rp50
+const BROADCAST_DELAY = 1000         // Delay 1 detik setelah deteksi perubahan
+const MIN_PRICE_CHANGE = 1           // Skip perubahan < Rp1
 
 // Konversi troy ounce ke gram
 const TROY_OZ_TO_GRAM = 31.1034768
@@ -33,10 +33,8 @@ const NORMAL_LOW_THRESHOLD = 1000
 
 let lastKnownPrice = null
 let lastBroadcastedPrice = null
-let lastBroadcastTime = 0
 let isBroadcasting = false
 let broadcastCount = 0
-let priceChangePending = false
 
 // Reconnect settings
 let reconnectAttempts = 0
@@ -464,9 +462,9 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
   let headerSection = ''
   if (priceChange && priceChange.buyChange !== 0) {
     if (priceChange.buyChange > 0) {
-      headerSection = 'HARGA NAIK 🚀\n'
+      headerSection = 'HARGA NAIK 🚀🚀🚀🚀\n'
     } else {
-      headerSection = 'HARGA TURUN 🔻\n'
+      headerSection = 'HARGA TURUN 🔻🔻🔻🔻\n'
     }
   }
   
@@ -559,10 +557,7 @@ async function doBroadcast(priceChange) {
       }
     }
     
-    lastBroadcastTime = Date.now()
     pushLog(`✅ [#${currentBroadcastId}] Sent: ${successCount}, Failed: ${failCount}`)
-    
-    priceChangePending = false
     
   } catch (e) {
     pushLog(`❌ Broadcast error: ${e.message}`)
@@ -599,7 +594,7 @@ async function checkPriceUpdate() {
       sellChange: currentPrice.sell - lastKnownPrice.sell
     }
     
-    // SMART FILTER: Skip perubahan < Rp50
+    // SMART FILTER: Skip perubahan < Rp1
     const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
     const sellChangeSinceBroadcast = Math.abs(currentPrice.sell - (lastBroadcastedPrice?.sell || currentPrice.sell))
     
@@ -616,29 +611,29 @@ async function checkPriceUpdate() {
     
     pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
     
-    // Set flag bahwa ada perubahan harga
-    priceChangePending = true
+    // ⚡ INSTANT BROADCAST - Tunggu 1 detik lalu kirim
+    pushLog(`⏳ Waiting ${BROADCAST_DELAY/1000}s before broadcast...`)
+    await new Promise(r => setTimeout(r, BROADCAST_DELAY))
+    
+    if (!isBroadcasting) {
+      const finalPriceChange = {
+        buyChange: currentPrice.buy - lastBroadcastedPrice.buy,
+        sellChange: currentPrice.sell - lastBroadcastedPrice.sell
+      }
+      await doBroadcast(finalPriceChange)
+    }
     
   } catch (e) {
     // Silent fail
   }
 }
 
-// SCHEDULED BROADCAST - Kirim tepat setiap 1 menit jika ada perubahan
-setInterval(async () => {
-  if (priceChangePending && !isBroadcasting) {
-    const priceChange = {
-      buyChange: lastKnownPrice.buy - lastBroadcastedPrice.buy,
-      sellChange: lastKnownPrice.sell - lastBroadcastedPrice.sell
-    }
-    await doBroadcast(priceChange)
-  }
-}, BROADCAST_SCHEDULE) // Tepat setiap 1 menit
-
+// Cek harga setiap 1 detik
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
-console.log(`✅ Scheduled Broadcast: every ${BROADCAST_SCHEDULE/1000}s (1 minute)`)
-console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE} (skip smaller changes)`)
-console.log(`⏰ No "too soon" messages - broadcasts on schedule only`)
+
+console.log(`✅ Instant Broadcast: ${BROADCAST_DELAY/1000}s delay after price change`)
+console.log(`📊 Price check interval: ${PRICE_CHECK_INTERVAL/1000}s`)
+console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`🌍 XAU/USD: TradingView → Investing → Google\n`)
 
 const app = express()
@@ -722,7 +717,7 @@ async function start() {
   sock.ev.on('connection.update', async (u) => {
     const { connection, lastDisconnect, qr } = u
     
-if (qr) {
+    if (qr) {
       lastQr = qr
       pushLog('QR ready')
     }
@@ -731,7 +726,7 @@ if (qr) {
       const reason = lastDisconnect?.error?.output?.statusCode
       pushLog(`Closed: ${reason}`)
       
-      if (reason === DisconnectReason.loggedOut) {
+if (reason === DisconnectReason.loggedOut) {
         pushLog('LOGGED OUT')
         return
       }
