@@ -18,14 +18,19 @@ const TREASURY_URL = process.env.TREASURY_URL ||
 const COOLDOWN_PER_CHAT = 60000
 const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
-const RANDOM_DELAY_MIN = 500
-const RANDOM_DELAY_MAX = 1000
 
 // REAL-TIME dengan DEBOUNCE & MIN CHANGE
 const PRICE_CHECK_INTERVAL = 2000
 const DEBOUNCE_TIME = 5000
 const MIN_PRICE_CHANGE = 50
 const MIN_BROADCAST_INTERVAL = 10000
+
+// Konversi troy ounce ke gram
+const TROY_OZ_TO_GRAM = 31.1034768
+
+// Threshold untuk harga normal/abnormal
+const NORMAL_THRESHOLD = 2000
+const NORMAL_LOW_THRESHOLD = 1000
 
 let lastKnownPrice = null
 let lastBroadcastedPrice = null
@@ -70,10 +75,6 @@ setInterval(() => {
 function normalizeText(msg) {
   if (!msg) return ''
   return msg.replace(/\s+/g, ' ').trim().toLowerCase()
-}
-
-function isGroupMessage(m) {
-  return m.key.remoteJid?.endsWith('@g.us')
 }
 
 function shouldIgnoreMessage(m) {
@@ -129,7 +130,6 @@ function calculateDiscount(investmentAmount) {
 }
 
 function calculateProfit(buyRate, sellRate, investmentAmount) {
-  const originalPrice = investmentAmount
   const discountAmount = calculateDiscount(investmentAmount)
   const discountedPrice = investmentAmount - discountAmount
   const totalGrams = investmentAmount / buyRate
@@ -137,11 +137,8 @@ function calculateProfit(buyRate, sellRate, investmentAmount) {
   const totalProfit = sellValue - discountedPrice
   
   return {
-    originalPrice,
-    discountAmount,
     discountedPrice,
     totalGrams,
-    sellValue,
     profit: totalProfit
   }
 }
@@ -153,10 +150,10 @@ async function fetchUSDIDRFallback() {
     })
     if (res.ok) {
       const json = await res.json()
-      return { rate: json.rates?.IDR || 15750, change: 0, changePercent: 0 }
+      return { rate: json.rates?.IDR || 15750 }
     }
   } catch (_) {}
-  return { rate: 15750, change: 0, changePercent: 0 }
+  return { rate: 15750 }
 }
 
 async function fetchUSDIDRFromGoogle() {
@@ -175,13 +172,7 @@ async function fetchUSDIDRFromGoogle() {
     if (rateMatch?.[1]) {
       const rate = parseFloat(rateMatch[1].replace(/,/g, ''))
       if (rate > 1000 && rate < 50000) {
-        let change = 0, changePercent = 0
-        const changeMatch = html.match(/class="[^"]*P2Luy[^"]*"[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i)
-        if (changeMatch) {
-          change = parseFloat(changeMatch[1].replace(/,/g, ''))
-          changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
-        }
-        return { rate, change, changePercent }
+        return { rate }
       }
     }
   } catch (_) {}
@@ -201,7 +192,7 @@ async function fetchXAUUSDFromTradingView() {
           tickers: ['OANDA:XAUUSD'],
           query: { types: [] }
         },
-        columns: ['close', 'change', 'change_abs']
+        columns: ['close']
       }),
       signal: AbortSignal.timeout(5000)
     })
@@ -209,14 +200,11 @@ async function fetchXAUUSDFromTradingView() {
     if (res.ok) {
       const json = await res.json()
       if (json?.data?.[0]?.d) {
-        const data = json.data[0].d
-        const price = data[0]
-        const changePercent = data[1]
-        const change = data[2]
+        const price = json.data[0].d[0]
         
         if (price > 1000 && price < 10000) {
-          console.log(`✅ XAU/USD from TradingView: $${price.toFixed(2)} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)`)
-          return { price, change, changePercent }
+          console.log(`✅ XAU/USD from TradingView: $${price.toFixed(2)}`)
+          return price
         }
       }
     }
@@ -252,16 +240,8 @@ async function fetchXAUUSDFromInvesting() {
         const price = parseFloat(priceMatch[1].replace(/,/g, ''))
         
         if (price > 1000 && price < 10000) {
-          let change = 0, changePercent = 0
-          
-          const changeMatch = html.match(/([+-]?[0-9,\.]+)\s*\(([+-]?[0-9,\.]+)%\)/i)
-          if (changeMatch) {
-            change = parseFloat(changeMatch[1].replace(/,/g, ''))
-            changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
-          }
-          
-          console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)`)
-          return { price, change, changePercent }
+          console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)}`)
+          return price
         }
       }
     }
@@ -286,14 +266,8 @@ async function fetchXAUUSDFromGoogle() {
       if (priceMatch?.[1]) {
         const price = parseFloat(priceMatch[1].replace(/,/g, ''))
         if (price > 1000 && price < 10000) {
-          let change = 0, changePercent = 0
-          const changeMatch = html.match(/class="[^"]*P2Luy[^"]*"[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i)
-          if (changeMatch) {
-            change = parseFloat(changeMatch[1].replace(/,/g, ''))
-            changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
-          }
-          console.log(`✅ XAU/USD from Google Finance: $${price.toFixed(2)} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)`)
-          return { price, change, changePercent }
+          console.log(`✅ XAU/USD from Google Finance: $${price.toFixed(2)}`)
+          return price
         }
       }
     }
@@ -304,99 +278,104 @@ async function fetchXAUUSDFromGoogle() {
 }
 
 async function fetchXAUUSD() {
-  // Priority 1: TradingView API (paling akurat)
   let result = await fetchXAUUSDFromTradingView()
   if (result) return result
   
-  // Priority 2: Investing.com
   result = await fetchXAUUSDFromInvesting()
   if (result) return result
   
-  // Priority 3: Google Finance
   result = await fetchXAUUSDFromGoogle()
   if (result) return result
   
-  // Jika semua gagal, return null (tidak ditampilkan)
-  console.log('⚠️  All XAU/USD sources failed, will not display')
+  console.log('⚠️  All XAU/USD sources failed')
   return null
 }
 
-function formatMessage(treasuryData, usdIdrData, xauUsdData = null, priceChange = null) {
+function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) {
+  if (!xauUsdPrice) {
+    return {
+      status: 'DATA_INCOMPLETE',
+      message: '⚠️ Data XAU/USD tidak tersedia'
+    }
+  }
+  
+  // Hitung harga emas internasional dalam Rupiah per gram
+  const internationalPricePerGram = (xauUsdPrice / TROY_OZ_TO_GRAM) * usdIdrRate
+  
+  // Selisih harga jual Treasury dengan harga internasional
+  const difference = treasurySell - internationalPricePerGram
+  const differencePercent = ((difference / internationalPricePerGram) * 100).toFixed(2)
+  
+  let status = 'NORMAL'
+  let emoji = '✅'
+  let message = ''
+  
+  if (Math.abs(difference) <= NORMAL_LOW_THRESHOLD) {
+    status = 'NORMAL'
+    emoji = '✅'
+    message = `HARGA NORMAL ✅`
+  } else if (Math.abs(difference) <= NORMAL_THRESHOLD) {
+    status = 'NORMAL'
+    emoji = '✅'
+    message = `HARGA NORMAL ✅`
+  } else {
+    status = 'ABNORMAL'
+    emoji = '⚠️'
+    const selisihText = difference > 0 
+      ? `+${formatRupiah(Math.round(Math.abs(difference)))}` 
+      : `-${formatRupiah(Math.round(Math.abs(difference)))}`
+    message = `ABNORMAL ⚠️\nSELISIH HARGA JUAL - HARGA JUAL TREASURY = ${selisihText}\n📊 = dari data sebelumnya`
+  }
+  
+  return {
+    status,
+    emoji,
+    message,
+    internationalPrice: internationalPricePerGram,
+    difference,
+    differencePercent
+  }
+}
+
+function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null) {
   const buy = treasuryData?.data?.buying_rate || 0
   const sell = treasuryData?.data?.selling_rate || 0
-  const updated = treasuryData?.data?.updated_at || new Date().toISOString()
-  
-  const timeStr = updated.split('T')[1]?.substring(0, 5) || ''
-  
-  const usdIdrRate = usdIdrData.rate
-  const usdIdrChange = usdIdrData.change
-  const usdIdrChangePercent = usdIdrData.changePercent
-  const usdIdrEmoji = usdIdrChange >= 0 ? '📈' : '📉'
-  const usdIdrSign = usdIdrChange >= 0 ? '+' : ''
   
   const spread = sell - buy
   const spreadPercent = ((spread / buy) * 100).toFixed(2)
   
-  let priceIndicator = ''
-  if (priceChange) {
-    if (priceChange.buyChange > 0 || priceChange.sellChange > 0) {
-      priceIndicator = ' 📈'
-    } else if (priceChange.buyChange < 0 || priceChange.sellChange < 0) {
-      priceIndicator = ' 📉'
-    }
+  let statusSection = ''
+  
+  if (xauUsdPrice && usdIdrRate) {
+    const analysis = analyzePriceStatus(buy, sell, xauUsdPrice, usdIdrRate)
+    statusSection = `${analysis.emoji} *${analysis.message}*\n`
   }
   
-  // Hanya tampilkan XAU/USD jika data berhasil diambil
-  let xauUsdSection = ''
-  if (xauUsdData && xauUsdData.price) {
-    const xauPrice = xauUsdData.price
-    const xauChange = xauUsdData.change || 0
-    const xauChangePercent = xauUsdData.changePercent || 0
-    const xauEmoji = xauChange >= 0 ? '📈' : '📉'
-    const xauSign = xauChange >= 0 ? '+' : ''
-    
-    xauUsdSection = `\n🌍 *XAU/USD:* $${xauPrice.toFixed(2)}/oz ${xauSign}${Math.abs(xauChangePercent).toFixed(2)}% ${xauEmoji}`
+  // Format harga
+  const buyFormatted = `Rp${formatRupiah(buy)}/gr`
+  const sellFormatted = `Rp${formatRupiah(sell)}/gr`
+  const spreadFormatted = `Rp${formatRupiah(Math.abs(spread))} (-${spreadPercent}%)`
+  
+  // Kurs & Pasar section
+  let marketSection = '💱 *Kurs & Pasar*\n'
+  marketSection += `💵 USD/IDR: Rp${formatRupiah(Math.round(usdIdrRate))}\n`
+  
+  if (xauUsdPrice) {
+    marketSection += `💰 XAU/USD: $${xauUsdPrice.toFixed(2)}/oz`
   }
   
-  return `💎 *HARGA EMAS TREASURY* 💎${priceIndicator}
-⏰ ${timeStr} WIB
+  return `${statusSection}
+📊 *Harga Beli:* ${buyFormatted}
+📉 *Harga Jual:* ${sellFormatted}
+💬 *Selisih:* ${spreadFormatted}
 
-┏━━━━━━━━━━━━━━━━━━━
-┣ 📊 *Beli:* Rp${formatRupiah(buy)}/gr
-┣ 📊 *Jual:* Rp${formatRupiah(sell)}/gr
-┣ 📉 *Spread:* Rp${formatRupiah(spread)} (${spreadPercent}%)
-┗━━━━━━━━━━━━━━━━━━━
+${marketSection}
 
-💵 *USD/IDR:* Rp${formatRupiah(Math.round(usdIdrRate))} ${usdIdrSign}${Math.abs(usdIdrChangePercent).toFixed(2)}% ${usdIdrEmoji}${xauUsdSection}
+🎁 *Promo*
+💰 Rp20 Juta ➜ ${calculateProfit(buy, sell, 20000000).totalGrams.toFixed(2)} gr | Profit: +Rp${formatRupiah(Math.round(calculateProfit(buy, sell, 20000000).profit))} 🚀
+💰 Rp30 Juta ➜ ${calculateProfit(buy, sell, 30000000).totalGrams.toFixed(2)} gr | Profit: +Rp${formatRupiah(Math.round(calculateProfit(buy, sell, 30000000).profit))} 🚀
 
-${generateDiscountSimulation(buy, sell)}
-
-⚡ _Update real-time (min ±Rp50)_`
-}
-
-function generateDiscountSimulation(buy, sell) {
-  const amounts = [
-    { value: 20000000, label: '20 Juta' },
-    { value: 30000000, label: '30 Juta' }
-  ]
-  
-  return amounts.map(({ value, label }) => {
-    const calc = calculateProfit(buy, sell, value)
-    
-    let emoji = '📉'
-    if (calc.profit > 0) {
-      if (calc.profit >= 1500) emoji = '🚀'
-      else if (calc.profit >= 1000) emoji = '💎'
-      else if (calc.profit >= 500) emoji = '📈'
-    }
-    
-    const profitSign = calc.profit >= 0 ? '+' : ''
-    
-    return `🎁 *${label}*
-├ Bayar: Rp${formatRupiah(Math.round(calc.discountedPrice))}
-├ Dapat: ${calc.totalGrams.toFixed(4)} gram
-└ Profit: ${profitSign}Rp${formatRupiah(Math.round(calc.profit))} ${emoji}`
-  }).join('\n\n')
+⚡ _Harga diperbarui otomatis_`
 }
 
 async function fetchTreasury() {
@@ -429,8 +408,6 @@ async function doBroadcast(priceChange) {
   isBroadcasting = true
   broadcastCount++
   const currentBroadcastId = broadcastCount
-
-  const time = new Date().toISOString().substring(11, 19)
   
   if (!sock || !isReady || subscriptions.size === 0) {
     isBroadcasting = false
@@ -457,7 +434,7 @@ async function doBroadcast(priceChange) {
       sell: treasury?.data?.selling_rate
     }
     
-    const message = formatMessage(treasury, usdIdr, xauUsd, priceChange)
+    const message = formatMessage(treasury, usdIdr.rate, xauUsd)
     
     pushLog(`📤 [#${currentBroadcastId}] Broadcasting to ${subscriptions.size} subs`)
     
@@ -562,10 +539,10 @@ async function checkPriceUpdate() {
 
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 console.log(`✅ Real-time monitoring: every ${PRICE_CHECK_INTERVAL/1000}s`)
-console.log(`⏱️  Debounce: ${DEBOUNCE_TIME/1000}s (wait for stable price)`)
+console.log(`⏱️  Debounce: ${DEBOUNCE_TIME/1000}s`)
 console.log(`📊 Min change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`⏰ Min broadcast interval: ${MIN_BROADCAST_INTERVAL/1000}s`)
-console.log(`🌍 XAU/USD: TradingView → Investing → Google → Skip if all fail\n`)
+console.log(`🌍 XAU/USD: TradingView → Investing → Google\n`)
 
 const app = express()
 app.use(express.json())
@@ -592,13 +569,6 @@ app.get('/stats', (_req, res) => {
     lastPrice: lastKnownPrice,
     lastBroadcasted: lastBroadcastedPrice,
     broadcastCount: broadcastCount,
-    interval: `${PRICE_CHECK_INTERVAL/1000}s`,
-    debounce: `${DEBOUNCE_TIME/1000}s`,
-    minChange: `Rp${MIN_PRICE_CHANGE}`,
-    minBroadcastInterval: `${MIN_BROADCAST_INTERVAL/1000}s`,
-    pendingBroadcast: !!pendingBroadcast,
-    isBroadcasting: isBroadcasting,
-    lastBroadcastTime: lastBroadcastTime ? new Date(lastBroadcastTime).toISOString() : null,
     logs: logs.slice(-20)
   })
 })
@@ -693,14 +663,14 @@ async function start() {
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update real-time:\n• Cek 2s\n• Broadcast stabil 5s\n• Min ±Rp50\n• Interval 10s\n\n_Ketik "berhenti" untuk stop._'
+              text: '✅ Sudah berlangganan!\n\n📢 Update real-time otomatis'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`+ ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 *Langganan Berhasil!*\n\n📢 Update INSTANT saat harga berubah!\n\n✅ Cek setiap 2 detik\n✅ Broadcast setelah stabil 5 detik\n✅ Min perubahan ±Rp50\n✅ Min interval 10 detik\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 *Langganan Berhasil!*\n\n📢 Notifikasi otomatis saat harga berubah\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
@@ -738,12 +708,12 @@ async function start() {
             fetchUSDIDRFromGoogle(),
             fetchXAUUSD()
           ])
-          replyText = formatMessage(treasury, usdIdr, xauUsd)
+          replyText = formatMessage(treasury, usdIdr.rate, xauUsd)
         } catch (e) {
           replyText = '❌ Gagal mengambil data harga.'
         }
 
-        await new Promise(r => setTimeout(r, Math.floor(Math.random() * 500) + 500))
+        await new Promise(r => setTimeout(r, 500))
         
         try {
           await sock.sendPresenceUpdate('paused', sendTarget)
