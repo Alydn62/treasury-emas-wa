@@ -15,7 +15,7 @@ const TREASURY_URL = process.env.TREASURY_URL ||
   'https://api.treasury.id/api/v1/antigrvty/gold/rate'
 
 // Anti-spam settings
-const COOLDOWN_PER_CHAT = 60000 // 1 menit
+const COOLDOWN_PER_CHAT = 60000 // 1 menit per chat (DM atau Grup)
 const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 6000
 const RANDOM_DELAY_MIN = 2000
@@ -30,7 +30,7 @@ const BASE_RECONNECT_DELAY = 5000
 let lastQr = null
 const logs = []
 const processedMsgIds = new Set()
-const lastReplyAtPerChat = new Map()
+const lastReplyAtPerChat = new Map() // Menyimpan last reply per chat (DM atau Grup)
 let lastGlobalReplyAt = 0
 let isReady = false
 
@@ -54,16 +54,23 @@ function normalizeText(msg) {
   return msg.replace(/\s+/g, ' ').trim().toLowerCase()
 }
 
+function isGroupMessage(m) {
+  // Grup ID format: xxxxx@g.us
+  return m.key.remoteJid?.endsWith('@g.us')
+}
+
 function shouldIgnoreMessage(m) {
   if (!m || !m.key) return true
   if (m.key.remoteJid === 'status@broadcast') return true
   if (m.key.fromMe) return true
+  
   const hasText =
     m.message?.conversation ||
     m.message?.extendedTextMessage?.text ||
     m.message?.imageMessage?.caption ||
     m.message?.videoMessage?.caption
   if (!hasText) return true
+  
   return false
 }
 
@@ -286,6 +293,7 @@ app.get('/stats', (_req, res) => {
       .slice(-10)
       .map(([chat, lastTime]) => ({
         chat: chat.substring(0, 25) + '...',
+        type: chat.endsWith('@g.us') ? 'GROUP' : 'DM',
         lastReply: new Date(lastTime).toISOString(),
         cooldown: Math.max(0, Math.round((COOLDOWN_PER_CHAT - (Date.now() - lastTime)) / 1000)) + 's'
       })),
@@ -371,7 +379,7 @@ async function start() {
         return
       }
       
-      // Untuk error lain (termasuk 515), coba reconnect
+      // Untuk error lain, reconnect
       if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         const delay = BASE_RECONNECT_DELAY * Math.pow(1.5, reconnectAttempts)
         reconnectAttempts++
@@ -390,7 +398,7 @@ async function start() {
       
     } else if (connection === 'open') {
       lastQr = null
-      reconnectAttempts = 0 // Reset counter saat berhasil connect
+      reconnectAttempts = 0
       console.log('✅ Connected!')
       pushLog('Connected')
       
@@ -423,24 +431,41 @@ async function start() {
         if (!text || !/\bemas\b/.test(text)) continue
 
         const sendTarget = msg.key.remoteJid
+        const isGroup = isGroupMessage(msg)
         const now = Date.now()
         
+        // Log untuk debugging
+        console.log(`📨 Message from: ${isGroup ? 'GROUP' : 'DM'} | ${sendTarget}`)
+        pushLog(`Message: ${isGroup ? 'GROUP' : 'DM'} | ${text.substring(0, 30)}`)
+        
+        // PENTING: Cooldown per chat (1 menit untuk DM ATAU Grup)
+        // Jika di grup, siapapun yang ketik "emas" dalam 1 menit akan di-ignore
         const lastReply = lastReplyAtPerChat.get(sendTarget) || 0
-        if (now - lastReply < COOLDOWN_PER_CHAT) {
-          pushLog(`Cooldown: ${sendTarget}`)
-          continue
+        const timeSinceLastReply = now - lastReply
+        
+        if (timeSinceLastReply < COOLDOWN_PER_CHAT) {
+          const remaining = Math.ceil((COOLDOWN_PER_CHAT - timeSinceLastReply) / 1000)
+          console.log(`⏳ Cooldown: ${isGroup ? 'GROUP' : 'DM'} ${sendTarget} (${remaining}s remaining)`)
+          pushLog(`Cooldown: ${remaining}s`)
+          continue // Skip pesan ini
         }
         
-        if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) continue
+        // Global throttle
+        if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) {
+          pushLog('Global throttle active')
+          continue
+        }
 
-        pushLog(`Processing: ${sendTarget}`)
+        pushLog(`Processing: ${isGroup ? 'GROUP' : 'DM'}`)
 
+        // Typing indicator
         try {
           await sock.sendPresenceUpdate('composing', sendTarget)
         } catch (_) {}
         
         await new Promise(r => setTimeout(r, TYPING_DURATION))
 
+        // Fetch data
         let replyText
         try {
           const [treasury, usdIdr] = await Promise.all([
@@ -449,35 +474,39 @@ async function start() {
           ])
           
           replyText = formatMessage(treasury, usdIdr)
-          pushLog('Fetched')
+          pushLog('Data fetched')
         } catch (e) {
           replyText = '❌ Gagal mengambil data.\n⏱️ Coba lagi nanti.'
-          pushLog(`Error: ${e.message}`)
+          pushLog(`Fetch error: ${e.message}`)
         }
 
+        // Random delay
         const randomDelay = Math.floor(Math.random() * (RANDOM_DELAY_MAX - RANDOM_DELAY_MIN)) + RANDOM_DELAY_MIN
         await new Promise(r => setTimeout(r, randomDelay))
         
+        // Stop typing
         try {
           await sock.sendPresenceUpdate('paused', sendTarget)
         } catch (_) {}
         
+        // Send message
         await sock.sendMessage(
           sendTarget,
           { text: replyText },
-          { quoted: msg }
+          { quoted: msg } // Reply ke pesan yang trigger bot
         )
 
+        // PENTING: Update last reply time untuk chat ini
         lastReplyAtPerChat.set(sendTarget, now)
         lastGlobalReplyAt = now
         
-        console.log(`✅ Sent to ${sendTarget}`)
-        pushLog(`Sent`)
+        console.log(`✅ Sent to ${isGroup ? 'GROUP' : 'DM'}: ${sendTarget}`)
+        pushLog(`Sent to ${isGroup ? 'GROUP' : 'DM'}`)
         
         await new Promise(r => setTimeout(r, 2000))
         
       } catch (e) {
-        pushLog(`Error: ${e.message}`)
+        pushLog(`Handler error: ${e.message}`)
         console.error('Error:', e)
         await new Promise(r => setTimeout(r, 5000))
       }
