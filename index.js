@@ -709,7 +709,7 @@ async function doBroadcast(priceChange) {
     const [treasury, usdIdr, xauUsd] = await Promise.all([
       fetchTreasury(),
       fetchUSDIDRFromGoogle(),
-      fetchXAUUSDCached()  // Gunakan versi cached
+      fetchXAUUSDCached()
     ])
     
     lastBroadcastedPrice = {
@@ -767,7 +767,6 @@ async function checkPriceUpdate() {
     
     if (!buyChanged && !sellChanged) return
     
-    // SMART FILTER: Skip perubahan < Rp1
     const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
     const sellChangeSinceBroadcast = Math.abs(currentPrice.sell - (lastBroadcastedPrice?.sell || currentPrice.sell))
     
@@ -776,11 +775,9 @@ async function checkPriceUpdate() {
       return
     }
     
-    // CEK MENIT SEKARANG
     const now = new Date()
     const currentMinute = now.getMinutes()
     
-    // Jika sudah broadcast di menit ini, skip
     if (currentMinute === lastBroadcastMinute) {
       const priceChange = {
         buyChange: currentPrice.buy - lastKnownPrice.buy,
@@ -797,7 +794,6 @@ async function checkPriceUpdate() {
       return
     }
     
-    // Ini perubahan pertama di menit baru, LANGSUNG BROADCAST
     const priceChange = {
       buyChange: currentPrice.buy - lastKnownPrice.buy,
       sellChange: currentPrice.sell - lastKnownPrice.sell
@@ -811,10 +807,8 @@ async function checkPriceUpdate() {
     
     pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
     
-    // Update menit terakhir broadcast
     lastBroadcastMinute = currentMinute
     
-    // LANGSUNG BROADCAST
     const finalPriceChange = {
       buyChange: currentPrice.buy - lastBroadcastedPrice.buy,
       sellChange: currentPrice.sell - lastBroadcastedPrice.sell
@@ -826,7 +820,6 @@ async function checkPriceUpdate() {
   }
 }
 
-// Cek harga setiap 5 detik (optimasi CPU dari 1 detik)
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 
 console.log(`✅ One broadcast per minute - Send immediately on first change`)
@@ -838,7 +831,20 @@ console.log(`🌍 XAU/USD: TradingView → Investing → Google\n`)
 const app = express()
 app.use(express.json())
 
-app.get('/', (_req, res) => res.send('✅ Bot Running'))
+app.get('/', (_req, res) => {
+  res.status(200).send('✅ Bot Running')
+})
+
+app.get('/health', (_req, res) => {
+  res.status(200).json({ 
+    status: 'ok',
+    timestamp: Date.now(),
+    uptime: Math.floor(process.uptime()),
+    ready: isReady,
+    subscriptions: subscriptions.size,
+    wsConnected: sock?.ws?.readyState === 1
+  })
+})
 
 app.get('/qr', async (_req, res) => {
   if (!lastQr) return res.send('<pre>QR not ready</pre>')
@@ -862,13 +868,15 @@ app.get('/stats', (_req, res) => {
     broadcastCount: broadcastCount,
     lastBroadcastMinute: lastBroadcastMinute,
     cachedXAUUSD: cachedXAUUSD,
+    wsConnected: sock?.ws?.readyState === 1,
     logs: logs.slice(-20)
   })
 })
 
 app.listen(PORT, () => {
-  console.log(`🌐 http://localhost:${PORT}`)
-  console.log(`📊 /stats\n`)
+  console.log(`🌐 Server: http://localhost:${PORT}`)
+  console.log(`📊 Stats: http://localhost:${PORT}/stats`)
+  console.log(`💊 Health: http://localhost:${PORT}/health\n`)
 })
 
 // KEEP-ALIVE SYSTEM
@@ -876,20 +884,40 @@ const SELF_URL = process.env.RENDER_EXTERNAL_URL ||
                  process.env.RAILWAY_STATIC_URL || 
                  `http://localhost:${PORT}`
 
+console.log(`🏓 Keep-alive target: ${SELF_URL}`)
+console.log(`🏓 Keep-alive interval: 60 seconds\n`)
+
+// Ping setiap 1 menit
 setInterval(async () => {
   try {
-    const response = await fetch(SELF_URL)
+    const response = await fetch(`${SELF_URL}/health`, {
+      signal: AbortSignal.timeout(5000)
+    })
+    
     if (response.ok) {
-      pushLog('🏓 Keep-alive ping successful')
+      const data = await response.json()
+      pushLog(`🏓 Ping OK (uptime: ${Math.floor(data.uptime/60)}m, subs: ${data.subscriptions})`)
     } else {
-      pushLog(`⚠️  Keep-alive ping returned ${response.status}`)
+      pushLog(`⚠️  Ping HTTP ${response.status}`)
     }
   } catch (e) {
-    pushLog(`⚠️  Keep-alive ping failed: ${e.message}`)
+    pushLog(`⚠️  Ping failed: ${e.message}`)
   }
-}, 2 * 60 * 1000)
+}, 60 * 1000)
 
-console.log(`🏓 Keep-alive system enabled (ping every 2 minutes)`)
+// Initial ping setelah 30 detik
+setTimeout(async () => {
+  try {
+    const response = await fetch(`${SELF_URL}/health`, {
+      signal: AbortSignal.timeout(5000)
+    })
+    if (response.ok) {
+      pushLog('🏓 Initial ping successful')
+    }
+  } catch (e) {
+    pushLog(`⚠️  Initial ping failed: ${e.message}`)
+  }
+}, 30000)
 
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth')
@@ -920,36 +948,38 @@ async function start() {
     
     if (qr) {
       lastQr = qr
-      pushLog('QR ready')
+      pushLog('📱 QR ready at /qr')
     }
     
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode
-      pushLog(`Closed: ${reason}`)
+      pushLog(`❌ Connection closed: ${reason}`)
       
       if (reason === DisconnectReason.loggedOut) {
-        pushLog('LOGGED OUT')
+        pushLog('🚪 LOGGED OUT - Manual login required')
         return
       }
       
       if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         const delay = BASE_RECONNECT_DELAY * Math.pow(1.5, reconnectAttempts)
         reconnectAttempts++
-        pushLog(`Reconnect in ${Math.round(delay/1000)}s`)
+        pushLog(`🔄 Reconnecting in ${Math.round(delay/1000)}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
         setTimeout(() => start(), delay)
+      } else {
+        pushLog('❌ Max reconnect attempts reached')
       }
       
     } else if (connection === 'open') {
       lastQr = null
       reconnectAttempts = 0
-      pushLog('Connected')
+      pushLog('✅ WhatsApp connected')
       
       isReady = false
-      pushLog('Warmup 15s')
+      pushLog('⏳ Warming up 15s...')
       
       setTimeout(() => {
         isReady = true
-        pushLog('Ready!')
+        pushLog('🚀 Bot ready!')
         checkPriceUpdate()
       }, 15000)
     }
@@ -980,7 +1010,7 @@ async function start() {
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
-            pushLog(`+ ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
+            pushLog(`➕ New sub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
               text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Kirim langsung di perubahan pertama setiap menit\n\n_Ketik "berhenti" untuk stop._'
@@ -992,7 +1022,7 @@ async function start() {
         if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             subscriptions.delete(sendTarget)
-            pushLog(`- ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
+            pushLog(`➖ Unsub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             await sock.sendMessage(sendTarget, { text: '👋 Langganan dihentikan.' }, { quoted: msg })
           } else {
             await sock.sendMessage(sendTarget, { text: '❌ Belum berlangganan.' }, { quoted: msg })
@@ -1019,7 +1049,7 @@ async function start() {
           const [treasury, usdIdr, xauUsd] = await Promise.all([
             fetchTreasury(),
             fetchUSDIDRFromGoogle(),
-            fetchXAUUSDCached()  // Gunakan cached version
+            fetchXAUUSDCached()
           ])
           replyText = formatMessage(treasury, usdIdr.rate, xauUsd, null)
         } catch (e) {
@@ -1040,13 +1070,13 @@ async function start() {
         await new Promise(r => setTimeout(r, 1000))
         
       } catch (e) {
-        pushLog(`Error: ${e.message}`)
+        pushLog(`❌ Message error: ${e.message}`)
       }
     }
   })
 }
 
 start().catch(e => {
-  console.error('Fatal:', e)
+  console.error('💀 Fatal error:', e)
   process.exit(1)
 })
