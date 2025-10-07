@@ -188,8 +188,45 @@ async function fetchUSDIDRFromGoogle() {
   return await fetchUSDIDRFallback()
 }
 
-async function fetchXAUUSD() {
-  // Method 1: Scrape dari Investing.com
+async function fetchXAUUSDFromTradingView() {
+  try {
+    const res = await fetch('https://scanner.tradingview.com/symbol', {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      body: JSON.stringify({
+        symbols: {
+          tickers: ['OANDA:XAUUSD'],
+          query: { types: [] }
+        },
+        columns: ['close', 'change', 'change_abs']
+      }),
+      signal: AbortSignal.timeout(5000)
+    })
+    
+    if (res.ok) {
+      const json = await res.json()
+      if (json?.data?.[0]?.d) {
+        const data = json.data[0].d
+        const price = data[0]
+        const changePercent = data[1]
+        const change = data[2]
+        
+        if (price > 1000 && price < 10000) {
+          console.log(`✅ XAU/USD from TradingView: $${price.toFixed(2)} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)`)
+          return { price, change, changePercent }
+        }
+      }
+    }
+  } catch (e) {
+    console.log('TradingView fetch error:', e.message)
+  }
+  return null
+}
+
+async function fetchXAUUSDFromInvesting() {
   try {
     const res = await fetch('https://www.investing.com/currencies/xau-usd', {
       headers: { 
@@ -203,12 +240,12 @@ async function fetchXAUUSD() {
     if (res.ok) {
       const html = await res.text()
       
-      let priceMatch = html.match(/([0-9]{1},[0-9]{3}\.[0-9]{2})\s*<\/span>/i)
+      let priceMatch = html.match(/data-test="instrument-price-last"[^>]*>([0-9,\.]+)</i)
       if (!priceMatch) {
-        priceMatch = html.match(/"last[Pp]rice"[^>]*>([0-9,\.]+)</i)
+        priceMatch = html.match(/([0-9]{1},[0-9]{3}\.[0-9]{2})\s*<\/span>/i)
       }
       if (!priceMatch) {
-        priceMatch = html.match(/data-test="instrument-price-last"[^>]*>([0-9,\.]+)</i)
+        priceMatch = html.match(/"last[Pp]rice"[^>]*>([0-9,\.]+)</i)
       }
       
       if (priceMatch?.[1]) {
@@ -223,7 +260,7 @@ async function fetchXAUUSD() {
             changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
           }
           
-          console.log(`✅ XAU/USD from Investing.com: $${price} (${changePercent >= 0 ? '+' : ''}${changePercent}%)`)
+          console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)`)
           return { price, change, changePercent }
         }
       }
@@ -231,8 +268,10 @@ async function fetchXAUUSD() {
   } catch (e) {
     console.log('Investing.com fetch error:', e.message)
   }
-  
-  // Method 2: Fallback ke Google Finance
+  return null
+}
+
+async function fetchXAUUSDFromGoogle() {
   try {
     const res = await fetch('https://www.google.com/finance/quote/XAU-USD', {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
@@ -253,7 +292,7 @@ async function fetchXAUUSD() {
             change = parseFloat(changeMatch[1].replace(/,/g, ''))
             changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
           }
-          console.log(`✅ XAU/USD from Google Finance: $${price} (${changePercent >= 0 ? '+' : ''}${changePercent}%)`)
+          console.log(`✅ XAU/USD from Google Finance: $${price.toFixed(2)} (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%)`)
           return { price, change, changePercent }
         }
       }
@@ -261,9 +300,25 @@ async function fetchXAUUSD() {
   } catch (e) {
     console.log('Google Finance fetch error:', e.message)
   }
+  return null
+}
+
+async function fetchXAUUSD() {
+  // Priority 1: TradingView API (paling akurat)
+  let result = await fetchXAUUSDFromTradingView()
+  if (result) return result
   
-  console.log('⚠️  Using XAU/USD fallback value')
-  return { price: 2650, change: 0, changePercent: 0 }
+  // Priority 2: Investing.com
+  result = await fetchXAUUSDFromInvesting()
+  if (result) return result
+  
+  // Priority 3: Google Finance
+  result = await fetchXAUUSDFromGoogle()
+  if (result) return result
+  
+  // Jika semua gagal, return null (tidak ditampilkan)
+  console.log('⚠️  All XAU/USD sources failed, will not display')
+  return null
 }
 
 function formatMessage(treasuryData, usdIdrData, xauUsdData = null, priceChange = null) {
@@ -291,6 +346,7 @@ function formatMessage(treasuryData, usdIdrData, xauUsdData = null, priceChange 
     }
   }
   
+  // Hanya tampilkan XAU/USD jika data berhasil diambil
   let xauUsdSection = ''
   if (xauUsdData && xauUsdData.price) {
     const xauPrice = xauUsdData.price
@@ -508,7 +564,8 @@ setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 console.log(`✅ Real-time monitoring: every ${PRICE_CHECK_INTERVAL/1000}s`)
 console.log(`⏱️  Debounce: ${DEBOUNCE_TIME/1000}s (wait for stable price)`)
 console.log(`📊 Min change: ±Rp${MIN_PRICE_CHANGE}`)
-console.log(`⏰ Min broadcast interval: ${MIN_BROADCAST_INTERVAL/1000}s\n`)
+console.log(`⏰ Min broadcast interval: ${MIN_BROADCAST_INTERVAL/1000}s`)
+console.log(`🌍 XAU/USD: TradingView → Investing → Google → Skip if all fail\n`)
 
 const app = express()
 app.use(express.json())
