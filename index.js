@@ -37,12 +37,12 @@ let sock = null
 
 // Subscription state
 const subscriptions = new Set()
-let lastBroadcastMinute = -1 // Track menit terakhir broadcast
+let lastBroadcastMinute = -1
 
 function pushLog(s) {
   const logMsg = `${new Date().toISOString()} ${s}`
   logs.push(logMsg)
-  console.log(logMsg) // Print ke console juga
+  console.log(logMsg)
   if (logs.length > 100) logs.splice(0, logs.length - 100)
 }
 
@@ -135,46 +135,163 @@ function calculateProfit(buyRate, sellRate, investmentAmount) {
   }
 }
 
+// PERBAIKAN: Fallback API jika Google Finance gagal
+async function fetchUSDIDRFallback() {
+  try {
+    console.log('🔄 Trying fallback API: ExchangeRate-API...')
+    const res = await fetch('https://api.exchangerate-api.com/v4/latest/USD')
+    if (res.ok) {
+      const json = await res.json()
+      const rate = json.rates?.IDR || 0
+      
+      if (rate > 1000 && rate < 50000) {
+        console.log(`✅ Fallback API success: ${rate}`)
+        pushLog(`Fallback API: USD/IDR = ${rate}`)
+        return {
+          rate,
+          change: 0,
+          changePercent: 0
+        }
+      }
+    }
+  } catch (e) {
+    console.error('❌ Fallback API error:', e.message)
+  }
+  
+  // Ultimate fallback
+  console.log('⚠️  Using manual fallback')
+  pushLog('Using manual fallback for USD/IDR')
+  return { 
+    rate: 15750, 
+    change: 0, 
+    changePercent: 0 
+  }
+}
+
+// PERBAIKAN: Scraping Google Finance dengan multiple patterns
 async function fetchUSDIDRFromGoogle() {
   try {
     const url = 'https://www.google.com/finance/quote/USD-IDR'
     const res = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'max-age=0'
       }
     })
     
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`)
+    }
     
     const html = await res.text()
+    console.log('📄 Google Finance HTML length:', html.length)
     
-    let rateMatch = html.match(/class="YMlKec fxKbKc">([0-9,\.]+)</i)
-    if (!rateMatch) rateMatch = html.match(/data-last-price="([0-9,\.]+)"/i)
-    if (!rateMatch) rateMatch = html.match(/USD to IDR[^\d]+([\d,\.]+)/i)
+    let rateMatch = null
+    
+    // Pattern 1: YMlKec fxKbKc (paling umum)
+    rateMatch = html.match(/class="YMlKec fxKbKc"[^>]*>([0-9,\.]+)<\/div>/i)
+    if (rateMatch) console.log('✓ Pattern 1 matched')
+    
+    // Pattern 2: data-last-price
+    if (!rateMatch) {
+      rateMatch = html.match(/data-last-price="([0-9,\.]+)"/i)
+      if (rateMatch) console.log('✓ Pattern 2 matched')
+    }
+    
+    // Pattern 3: data-source-price
+    if (!rateMatch) {
+      rateMatch = html.match(/data-source-price="([0-9,\.]+)"/i)
+      if (rateMatch) console.log('✓ Pattern 3 matched')
+    }
+    
+    // Pattern 4: Cari angka setelah USD/IDR
+    if (!rateMatch) {
+      rateMatch = html.match(/USD[\s\/]*to[\s]*IDR[^\d]+([\d,\.]+)/i)
+      if (rateMatch) console.log('✓ Pattern 4 matched')
+    }
+    
+    // Pattern 5: JSON-LD structured data
+    if (!rateMatch) {
+      const jsonMatch = html.match(/"price"\s*:\s*"?([0-9,\.]+)"?/i)
+      if (jsonMatch) {
+        rateMatch = jsonMatch
+        console.log('✓ Pattern 5 matched')
+      }
+    }
+    
+    // Pattern 6: class fxKbKc tanpa YMlKec
+    if (!rateMatch) {
+      rateMatch = html.match(/class="[^"]*fxKbKc[^"]*"[^>]*>([0-9,\.]+)<\/div>/i)
+      if (rateMatch) console.log('✓ Pattern 6 matched')
+    }
+    
+    // Pattern 7: Cari di script tag dengan window variables
+    if (!rateMatch) {
+      const scriptMatch = html.match(/window\[['"]ds:[\d]+['"]\]\s*=\s*.*?"([0-9,\.]+)"/i)
+      if (scriptMatch) {
+        rateMatch = scriptMatch
+        console.log('✓ Pattern 7 matched')
+      }
+    }
     
     if (rateMatch && rateMatch[1]) {
       const rateStr = rateMatch[1].replace(/,/g, '')
       const rate = parseFloat(rateStr)
       
+      console.log(`💵 Parsed rate: ${rate}`)
+      
+      // Sanity check
       if (rate > 1000 && rate < 50000) {
+        // Extract perubahan harga
         let change = 0
         let changePercent = 0
-        const changeMatch = html.match(/class="[^"]*P2Luy[^"]*[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i)
-        if (changeMatch) {
-          change = parseFloat(changeMatch[1].replace(/,/g, ''))
-          changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
+        
+        const changePatterns = [
+          /class="[^"]*P2Luy[^"]*"[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i,
+          /class="[^"]*enJeMd[^"]*"[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i,
+          /"change"\s*:\s*"?([+-]?[\d,\.]+)"?/i
+        ]
+        
+        for (const pattern of changePatterns) {
+          const changeMatch = html.match(pattern)
+          if (changeMatch) {
+            change = parseFloat(changeMatch[1].replace(/,/g, ''))
+            if (changeMatch[2]) {
+              changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
+            }
+            console.log(`📊 Change found: ${change} (${changePercent}%)`)
+            break
+          }
         }
         
-        return { rate, change, changePercent }
+        pushLog(`Google Finance: USD/IDR = ${rate}`)
+        
+        return { 
+          rate, 
+          change, 
+          changePercent 
+        }
+      } else {
+        console.log(`❌ Rate out of range: ${rate}`)
       }
     }
     
-    throw new Error('Failed to parse')
+    throw new Error('Failed to parse USD/IDR from HTML')
+    
   } catch (e) {
+    console.error('❌ Google Finance error:', e.message)
     pushLog(`Google Finance error: ${e.message}`)
-    return { rate: 15750, change: 0, changePercent: 0 }
+    
+    // Fallback
+    return await fetchUSDIDRFallback()
   }
 }
 
@@ -269,27 +386,22 @@ async function broadcastToSubscribers() {
 
   if (!sock) {
     console.log('❌ Socket not initialized')
-    pushLog('Broadcast skipped: socket not ready')
     return
   }
 
   if (!isReady) {
-    console.log('❌ Bot not ready yet (warmup)')
-    pushLog('Broadcast skipped: bot not ready')
+    console.log('❌ Bot not ready yet')
     return
   }
 
   if (subscriptions.size === 0) {
     console.log('❌ No subscribers')
-    pushLog('Broadcast skipped: no subscribers')
     return
   }
 
   console.log(`📢 Broadcasting to ${subscriptions.size} subscriber(s)...`)
-  pushLog(`Broadcasting to ${subscriptions.size} subscribers`)
 
   try {
-    // Fetch data
     console.log('📥 Fetching data...')
     const [treasury, usdIdr] = await Promise.all([
       fetchTreasury(),
@@ -299,7 +411,6 @@ async function broadcastToSubscribers() {
     const message = formatMessage(treasury, usdIdr)
     console.log('✅ Data fetched successfully')
     
-    // Kirim ke semua subscriber
     let successCount = 0
     let failCount = 0
     
@@ -309,36 +420,29 @@ async function broadcastToSubscribers() {
         await sock.sendMessage(chatId, { text: message })
         successCount++
         console.log(`✅ Sent to ${chatId}`)
-        pushLog(`Broadcast sent to ${chatId}`)
         
-        // Delay antar pengiriman
         await new Promise(r => setTimeout(r, 2000))
       } catch (e) {
         failCount++
         console.log(`❌ Failed to send to ${chatId}: ${e.message}`)
-        pushLog(`Broadcast failed to ${chatId}: ${e.message}`)
       }
     }
     
     console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`)
     console.log(`📊 Broadcast complete: ${successCount} success, ${failCount} failed`)
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`)
-    pushLog(`Broadcast complete: ${successCount}/${subscriptions.size}`)
     
   } catch (e) {
     console.error('❌ Broadcast error:', e)
-    pushLog(`Broadcast error: ${e.message}`)
   }
 }
 
-// ------ BROADCAST SCHEDULER ------
-// Cek setiap detik
+// Broadcast scheduler
 setInterval(() => {
   const now = new Date()
   const currentMinute = now.getMinutes()
   const currentSecond = now.getSeconds()
   
-  // Broadcast setiap menit di detik 01
   if (currentSecond === 1 && currentMinute !== lastBroadcastMinute) {
     lastBroadcastMinute = currentMinute
     broadcastToSubscribers()
@@ -432,7 +536,6 @@ app.post('/unsubscribe', (req, res) => {
   res.json({ success: true, total: subscriptions.size })
 })
 
-// ENDPOINT BARU: Trigger broadcast manual
 app.get('/broadcast-now', async (_req, res) => {
   console.log('\n🔴 Manual broadcast triggered via API')
   await broadcastToSubscribers()
@@ -457,13 +560,61 @@ app.get('/test', async (_req, res) => {
   }
 })
 
+// ENDPOINT BARU: Test USD/IDR
+app.get('/test-usd', async (_req, res) => {
+  try {
+    console.log('\n🧪 Testing USD/IDR fetch...')
+    const usdIdr = await fetchUSDIDRFromGoogle()
+    res.json({
+      success: true,
+      data: usdIdr,
+      timestamp: new Date().toISOString()
+    })
+  } catch (e) {
+    res.status(500).json({
+      success: false,
+      error: e.message
+    })
+  }
+})
+
+// ENDPOINT BARU: Debug Google Finance
+app.get('/debug-google', async (_req, res) => {
+  try {
+    const url = 'https://www.google.com/finance/quote/USD-IDR'
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    })
+    const html = await response.text()
+    
+    // Cari semua angka yang mirip 15xxx - 16xxx
+    const possibleRates = html.match(/1[45][0-9]{3}[,\.]?[0-9]*/g)
+    
+    res.type('text/html').send(`
+      <h2>Debug Google Finance</h2>
+      <h3>Status: ${response.status}</h3>
+      <h3>HTML Length: ${html.length}</h3>
+      <h3>Possible Rates Found:</h3>
+      <pre>${JSON.stringify(possibleRates?.slice(0, 20), null, 2)}</pre>
+      <h3>HTML Preview (first 5000 chars):</h3>
+      <textarea style="width:100%; height:400px">${html.substring(0, 5000)}</textarea>
+    `)
+  } catch (e) {
+    res.status(500).send(`Error: ${e.message}`)
+  }
+})
+
 app.listen(PORT, () => {
   console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`)
   console.log(`🌐 Server running on port ${PORT}`)
   console.log(`📊 Stats: http://localhost:${PORT}/stats`)
   console.log(`👥 Subscribers: http://localhost:${PORT}/subscribers`)
   console.log(`🔴 Broadcast Now: http://localhost:${PORT}/broadcast-now`)
-  console.log(`🧪 Test: http://localhost:${PORT}/test`)
+  console.log(`🧪 Test Message: http://localhost:${PORT}/test`)
+  console.log(`💵 Test USD/IDR: http://localhost:${PORT}/test-usd`)
+  console.log(`🔍 Debug Google: http://localhost:${PORT}/debug-google`)
   console.log(`📱 QR: http://localhost:${PORT}/qr`)
   console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`)
 })
@@ -595,8 +746,7 @@ async function start() {
           continue
         }
         
-        // Command: berhenti
-        if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
+if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             subscriptions.delete(sendTarget)
             console.log(`➖ Unsubscribed: ${sendTarget}`)
