@@ -19,9 +19,8 @@ const COOLDOWN_PER_CHAT = 60000
 const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
 
-// INSTANT BROADCAST - Kirim langsung saat perubahan pertama, cooldown 1 menit
+// ONE BROADCAST PER MINUTE - Kirim langsung saat perubahan pertama di menit baru
 const PRICE_CHECK_INTERVAL = 1000    // Cek setiap 1 detik
-const BROADCAST_COOLDOWN = 60000     // Cooldown 1 menit antara broadcast
 const MIN_PRICE_CHANGE = 1           // Skip perubahan < Rp1
 
 // Konversi troy ounce ke gram
@@ -33,9 +32,9 @@ const NORMAL_LOW_THRESHOLD = 1000
 
 let lastKnownPrice = null
 let lastBroadcastedPrice = null
-let lastBroadcastTime = 0
 let isBroadcasting = false
 let broadcastCount = 0
+let lastBroadcastMinute = -1  // Track menit terakhir broadcast (0-59)
 
 // Reconnect settings
 let reconnectAttempts = 0
@@ -558,7 +557,6 @@ async function doBroadcast(priceChange) {
       }
     }
     
-    lastBroadcastTime = Date.now()
     pushLog(`✅ [#${currentBroadcastId}] Sent: ${successCount}, Failed: ${failCount}`)
     
   } catch (e) {
@@ -600,13 +598,12 @@ async function checkPriceUpdate() {
       return
     }
     
-    // CHECK COOLDOWN: Jika belum 1 menit sejak broadcast terakhir, skip
-    const now = Date.now()
-    const timeSinceLastBroadcast = now - lastBroadcastTime
+    // CEK MENIT SEKARANG
+    const now = new Date()
+    const currentMinute = now.getMinutes()
     
-    if (timeSinceLastBroadcast < BROADCAST_COOLDOWN) {
-      const remainingTime = Math.ceil((BROADCAST_COOLDOWN - timeSinceLastBroadcast) / 1000)
-      
+    // Jika sudah broadcast di menit ini, skip
+    if (currentMinute === lastBroadcastMinute) {
       const priceChange = {
         buyChange: currentPrice.buy - lastKnownPrice.buy,
         sellChange: currentPrice.sell - lastKnownPrice.sell
@@ -618,10 +615,11 @@ async function checkPriceUpdate() {
       const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
       const sellIcon = priceChange.sellChange > 0 ? '📈' : '📉'
       
-      pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)} (Cooldown: ${remainingTime}s)`)
+      pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)} (⏳ Wait next minute)`)
       return
     }
     
+    // Ini perubahan pertama di menit baru, LANGSUNG BROADCAST
     const priceChange = {
       buyChange: currentPrice.buy - lastKnownPrice.buy,
       sellChange: currentPrice.sell - lastKnownPrice.sell
@@ -635,7 +633,10 @@ async function checkPriceUpdate() {
     
     pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
     
-    // LANGSUNG BROADCAST (karena sudah lewat cooldown)
+    // Update menit terakhir broadcast
+    lastBroadcastMinute = currentMinute
+    
+    // LANGSUNG BROADCAST
     const finalPriceChange = {
       buyChange: currentPrice.buy - lastBroadcastedPrice.buy,
       sellChange: currentPrice.sell - lastBroadcastedPrice.sell
@@ -650,9 +651,8 @@ async function checkPriceUpdate() {
 // Cek harga setiap 1 detik
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 
-console.log(`✅ Instant Broadcast with 60s cooldown`)
+console.log(`✅ One broadcast per minute - Send immediately on first change`)
 console.log(`📊 Price check: every ${PRICE_CHECK_INTERVAL/1000}s`)
-console.log(`⏰ Broadcast cooldown: ${BROADCAST_COOLDOWN/1000}s`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`🌍 XAU/USD: TradingView → Investing → Google\n`)
 
@@ -674,11 +674,6 @@ app.get('/qr', async (_req, res) => {
 })
 
 app.get('/stats', (_req, res) => {
-  const timeSinceLastBroadcast = lastBroadcastTime ? Date.now() - lastBroadcastTime : null
-  const cooldownRemaining = timeSinceLastBroadcast && timeSinceLastBroadcast < BROADCAST_COOLDOWN
-    ? Math.ceil((BROADCAST_COOLDOWN - timeSinceLastBroadcast) / 1000)
-    : 0
-    
   res.json({
     status: isReady ? '🟢' : '🔴',
     uptime: Math.floor(process.uptime()),
@@ -686,7 +681,7 @@ app.get('/stats', (_req, res) => {
     lastPrice: lastKnownPrice,
     lastBroadcasted: lastBroadcastedPrice,
     broadcastCount: broadcastCount,
-    cooldownRemaining: cooldownRemaining,
+    lastBroadcastMinute: lastBroadcastMinute,
     logs: logs.slice(-20)
   })
 })
@@ -712,9 +707,7 @@ setInterval(async () => {
   } catch (e) {
     pushLog(`⚠️  Keep-alive ping failed: ${e.message}`)
   }
-}, 2 * 60 * 1000)
-
-console.log(`🏓 Keep-alive system enabled (ping every 2 minutes)`)
+}, 2 * 60 * 1000)console.log(`🏓 Keep-alive system enabled (ping every 2 minutes)`)
 
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth')
@@ -801,14 +794,14 @@ async function start() {
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah (cooldown 1 menit)'
+              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Max 1x broadcast per menit'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`+ ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Cooldown: 1 menit antara broadcast\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Kirim langsung di perubahan pertama setiap menit\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
