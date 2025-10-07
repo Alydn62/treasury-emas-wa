@@ -447,7 +447,7 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
     const selisihText = difference > 0 
       ? `+${formatRupiah(Math.round(Math.abs(difference)))}` 
       : `-${formatRupiah(Math.round(Math.abs(difference)))}`
-    message = `ABNORMAL ⚠️\nSELISIH HARGA JUAL - HARGA JUAL TREASURY = ${selisihText}\n📊 = dari data sebelumnya`
+    message = `ABNORMAL ⚠️\nSELISIH HARGA JUAL - HARGA JUAL TREASURY = ${selisihText}`
   }
   
   return {
@@ -472,12 +472,16 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
   let timeSection = ''
   if (updatedAt) {
     const date = new Date(updatedAt)
-    // Format: DD:HH:MM:SS WIB
-    const day = date.getDate().toString().padStart(2, '0')
+    
+    // Nama hari dalam Bahasa Indonesia
+    const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
+    const dayName = days[date.getDay()]
+    
+    // Format: Hari, jam:menit:detik WIB
     const hours = date.getHours().toString().padStart(2, '0')
     const minutes = date.getMinutes().toString().padStart(2, '0')
     const seconds = date.getSeconds().toString().padStart(2, '0')
-    timeSection = `🕐 *Update: ${day}:${hours}:${minutes}:${seconds} WIB*\n`
+    timeSection = `🕐 *Update: ${dayName}, ${hours}:${minutes}:${seconds} WIB*\n`
   }
   
   // Header untuk naik/turun
