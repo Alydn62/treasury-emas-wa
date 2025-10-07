@@ -220,10 +220,17 @@ async function fetchXAUUSDFromInvesting() {
     const res = await fetch('https://www.investing.com/currencies/xau-usd', {
       headers: { 
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'max-age=0'
       },
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(6000)
     })
     
     if (!res.ok) {
@@ -232,45 +239,273 @@ async function fetchXAUUSDFromInvesting() {
     }
     
     const html = await res.text()
+    const foundPrices = []
     
-    // Method 1: data-test attribute (paling reliable)
+    // ==========================================
+    // METHOD 1: data-test attribute (PALING RELIABLE)
+    // ==========================================
     let match = html.match(/data-test="instrument-price-last"[^>]*>([0-9,]+\.?[0-9]*)</i)
     if (match?.[1]) {
       const price = parseFloat(match[1].replace(/,/g, ''))
       if (price > 1000 && price < 10000) {
-        console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)} (method: data-test)`)
-        return price
+        foundPrices.push({ method: 'data-test', price, priority: 1 })
+        console.log(`🔍 Method 1 (data-test): $${price.toFixed(2)}`)
       }
     }
     
-    // Method 2: JSON-LD structured data
-    match = html.match(/<script type="application\/ld\+json"[^>]*>([^<]+)<\/script>/i)
-    if (match?.[1]) {
-      try {
-        const jsonData = JSON.parse(match[1])
-        const price = jsonData.price || jsonData['@graph']?.[0]?.price
-        if (price) {
-          const p = parseFloat(price)
-          if (p > 1000 && p < 10000) {
-            console.log(`✅ XAU/USD from Investing.com: $${p.toFixed(2)} (method: json-ld)`)
-            return p
-          }
-        }
-      } catch (_) {}
-    }
-    
-    // Method 3: JavaScript variable (backup)
-    match = html.match(/"last":\s*([0-9,]+\.?[0-9]*)/i)
+    // ==========================================
+    // METHOD 2: instrument-price-last class
+    // ==========================================
+    match = html.match(/class="instrument-price-last[^"]*"[^>]*>([0-9,]+\.?[0-9]*)</i)
     if (match?.[1]) {
       const price = parseFloat(match[1].replace(/,/g, ''))
       if (price > 1000 && price < 10000) {
-        console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)} (method: js-var)`)
-        return price
+        foundPrices.push({ method: 'class-instrument', price, priority: 2 })
+        console.log(`🔍 Method 2 (class-instrument): $${price.toFixed(2)}`)
       }
     }
     
-    console.log('⚠️  Investing.com: No valid price found')
-    return null
+    // ==========================================
+    // METHOD 3: JSON-LD structured data
+    // ==========================================
+    const jsonLdMatches = html.matchAll(/<script type="application\/ld\+json"[^>]*>(.*?)<\/script>/gis)
+    for (const jsonMatch of jsonLdMatches) {
+      try {
+        const jsonData = JSON.parse(jsonMatch[1])
+        
+        // Check direct price field
+        if (jsonData.price) {
+          const price = parseFloat(jsonData.price)
+          if (price > 1000 && price < 10000) {
+            foundPrices.push({ method: 'json-ld-direct', price, priority: 3 })
+            console.log(`🔍 Method 3a (json-ld-direct): $${price.toFixed(2)}`)
+          }
+        }
+        
+        // Check @graph array
+        if (jsonData['@graph']) {
+          for (const item of jsonData['@graph']) {
+            if (item.price) {
+              const price = parseFloat(item.price)
+              if (price > 1000 && price < 10000) {
+                foundPrices.push({ method: 'json-ld-graph', price, priority: 3 })
+                console.log(`🔍 Method 3b (json-ld-graph): $${price.toFixed(2)}`)
+              }
+            }
+          }
+        }
+        
+        // Check offers.price
+        if (jsonData.offers?.price) {
+          const price = parseFloat(jsonData.offers.price)
+          if (price > 1000 && price < 10000) {
+            foundPrices.push({ method: 'json-ld-offers', price, priority: 3 })
+            console.log(`🔍 Method 3c (json-ld-offers): $${price.toFixed(2)}`)
+          }
+        }
+      } catch (e) {
+        // Skip invalid JSON
+      }
+    }
+    
+    // ==========================================
+    // METHOD 4: JavaScript window object variables
+    // ==========================================
+    // Pattern: "last":12345.67 or 'last':12345.67
+    match = html.match(/["']last["']\s*:\s*([0-9]+\.?[0-9]*)/i)
+    if (match?.[1]) {
+      const price = parseFloat(match[1])
+      if (price > 1000 && price < 10000) {
+        foundPrices.push({ method: 'js-last', price, priority: 4 })
+        console.log(`🔍 Method 4a (js-last): $${price.toFixed(2)}`)
+      }
+    }
+    
+    // Pattern: priceLast or price_last
+    match = html.match(/price[_-]?last["']?\s*:\s*["']?([0-9,]+\.?[0-9]*)/i)
+    if (match?.[1]) {
+      const price = parseFloat(match[1].replace(/,/g, ''))
+      if (price > 1000 && price < 10000) {
+        foundPrices.push({ method: 'js-price-last', price, priority: 4 })
+        console.log(`🔍 Method 4b (js-price-last): $${price.toFixed(2)}`)
+      }
+    }
+    
+    // Pattern: lastPrice or last_price
+    match = html.match(/last[_-]?price["']?\s*:\s*["']?([0-9,]+\.?[0-9]*)/i)
+    if (match?.[1]) {
+      const price = parseFloat(match[1].replace(/,/g, ''))
+      if (price > 1000 && price < 10000) {
+        foundPrices.push({ method: 'js-last-price', price, priority: 4 })
+        console.log(`🔍 Method 4c (js-last-price): $${price.toFixed(2)}`)
+      }
+    }
+    
+    // ==========================================
+    // METHOD 5: Meta tags
+    // ==========================================
+    // og:price:amount
+    match = html.match(/<meta[^>]*property=["']og:price:amount["'][^>]*content=["']([0-9,]+\.?[0-9]*)["']/i)
+    if (match?.[1]) {
+      const price = parseFloat(match[1].replace(/,/g, ''))
+      if (price > 1000 && price < 10000) {
+        foundPrices.push({ method: 'meta-og-price', price, priority: 5 })
+        console.log(`🔍 Method 5a (meta-og-price): $${price.toFixed(2)}`)
+      }
+    }
+    
+    // twitter:data1
+    match = html.match(/<meta[^>]*name=["']twitter:data1["'][^>]*content=["']([0-9,]+\.?[0-9]*)["']/i)
+    if (match?.[1]) {
+      const price = parseFloat(match[1].replace(/,/g, ''))
+      if (price > 1000 && price < 10000) {
+        foundPrices.push({ method: 'meta-twitter', price, priority: 5 })
+        console.log(`🔍 Method 5b (meta-twitter): $${price.toFixed(2)}`)
+      }
+    }
+    
+    // ==========================================
+    // METHOD 6: data-value attribute
+    // ==========================================
+    match = html.match(/data-value=["']([0-9,]+\.?[0-9]*)["']/i)
+    if (match?.[1]) {
+      const price = parseFloat(match[1].replace(/,/g, ''))
+      if (price > 1000 && price < 10000) {
+        foundPrices.push({ method: 'data-value', price, priority: 6 })
+        console.log(`🔍 Method 6 (data-value): $${price.toFixed(2)}`)
+      }
+    }
+    
+    // ==========================================
+    // METHOD 7: Span with specific classes
+    // ==========================================
+    // last-price-value class
+    match = html.match(/<span[^>]*class=["'][^"']*last-price-value[^"']*["'][^>]*>([0-9,]+\.?[0-9]*)<\/span>/i)
+    if (match?.[1]) {
+      const price = parseFloat(match[1].replace(/,/g, ''))
+      if (price > 1000 && price < 10000) {
+        foundPrices.push({ method: 'span-last-price', price, priority: 7 })
+        console.log(`🔍 Method 7a (span-last-price): $${price.toFixed(2)}`)
+      }
+    }
+    
+    // price-last class
+    match = html.match(/<span[^>]*class=["'][^"']*price-last[^"']*["'][^>]*>([0-9,]+\.?[0-9]*)<\/span>/i)
+    if (match?.[1]) {
+      const price = parseFloat(match[1].replace(/,/g, ''))
+      if (price > 1000 && price < 10000) {
+        foundPrices.push({ method: 'span-price-last', price, priority: 7 })
+        console.log(`🔍 Method 7b (span-price-last): $${price.toFixed(2)}`)
+      }
+    }
+    
+    // ==========================================
+    // METHOD 8: Bid/Ask patterns
+    // ==========================================
+    match = html.match(/(?:bid|ask)[^0-9]*([0-9,]+\.[0-9]{2})/i)
+    if (match?.[1]) {
+      const price = parseFloat(match[1].replace(/,/g, ''))
+      if (price > 1000 && price < 10000) {
+        foundPrices.push({ method: 'bid-ask', price, priority: 8 })
+        console.log(`🔍 Method 8 (bid-ask): $${price.toFixed(2)}`)
+      }
+    }
+    
+    // ==========================================
+    // METHOD 9: Generic number pattern (LAST RESORT)
+    // ==========================================
+    // Look for price-like numbers in specific contexts
+    const pricePatterns = [
+      /instrument[^>]{0,50}([0-9]{1},?[0-9]{3}\.[0-9]{2})/i,
+      /quote[^>]{0,50}([0-9]{1},?[0-9]{3}\.[0-9]{2})/i,
+      /current[^>]{0,50}([0-9]{1},?[0-9]{3}\.[0-9]{2})/i
+    ]
+    
+    for (const pattern of pricePatterns) {
+      match = html.match(pattern)
+      if (match?.[1]) {
+        const price = parseFloat(match[1].replace(/,/g, ''))
+        if (price > 1000 && price < 10000) {
+          foundPrices.push({ method: 'generic-pattern', price, priority: 9 })
+          console.log(`🔍 Method 9 (generic): $${price.toFixed(2)}`)
+        }
+      }
+    }
+    
+    // ==========================================
+    // PRICE SELECTION LOGIC
+    // ==========================================
+    
+    if (foundPrices.length === 0) {
+      console.log('⚠️  Investing.com: No valid prices found with any method')
+      return null
+    }
+    
+    console.log(`📊 Found ${foundPrices.length} potential prices`)
+    
+    // Strategy 1: Jika hanya 1 harga ditemukan, langsung return
+    if (foundPrices.length === 1) {
+      console.log(`✅ XAU/USD from Investing.com: $${foundPrices[0].price.toFixed(2)} (method: ${foundPrices[0].method})`)
+      return foundPrices[0].price
+    }
+    
+    // Strategy 2: Group prices by similarity (within $1)
+    const priceGroups = new Map()
+    
+    for (const { method, price, priority } of foundPrices) {
+      let foundGroup = false
+      
+      for (const [groupPrice, items] of priceGroups) {
+        if (Math.abs(groupPrice - price) <= 1.0) {
+          items.push({ method, price, priority })
+          foundGroup = true
+          break
+        }
+      }
+      
+      if (!foundGroup) {
+        priceGroups.set(price, [{ method, price, priority }])
+      }
+    }
+    
+    console.log(`📊 Grouped into ${priceGroups.size} price clusters`)
+    
+    // Strategy 3: Pilih grup dengan jumlah terbanyak
+    let bestGroup = null
+    let maxCount = 0
+    let bestPriority = 999
+    
+    for (const [groupPrice, items] of priceGroups) {
+      const avgPriority = items.reduce((sum, item) => sum + item.priority, 0) / items.length
+      
+      // Prioritaskan grup dengan count terbanyak
+      if (items.length > maxCount) {
+        maxCount = items.length
+        bestGroup = items
+        bestPriority = avgPriority
+      } 
+      // Jika count sama, pilih yang prioritas lebih tinggi (angka lebih kecil)
+      else if (items.length === maxCount && avgPriority < bestPriority) {
+        bestGroup = items
+        bestPriority = avgPriority
+      }
+    }
+    
+    if (bestGroup) {
+      // Hitung average dari grup terbaik
+      const avgPrice = bestGroup.reduce((sum, item) => sum + item.price, 0) / bestGroup.length
+      const methods = bestGroup.map(item => item.method).join(', ')
+      
+      console.log(`✅ XAU/USD from Investing.com: $${avgPrice.toFixed(2)} (consensus from ${bestGroup.length} methods: ${methods})`)
+      return avgPrice
+    }
+    
+    // Strategy 4: Fallback - pilih yang prioritas tertinggi
+    foundPrices.sort((a, b) => a.priority - b.priority)
+    const fallbackPrice = foundPrices[0].price
+    
+    console.log(`✅ XAU/USD from Investing.com: $${fallbackPrice.toFixed(2)} (fallback method: ${foundPrices[0].method})`)
+    return fallbackPrice
     
   } catch (e) {
     console.log('❌ Investing.com fetch error:', e.message)
