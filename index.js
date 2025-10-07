@@ -21,13 +21,15 @@ const TYPING_DURATION = 2000
 const RANDOM_DELAY_MIN = 500
 const RANDOM_DELAY_MAX = 1000
 
-// REAL-TIME dengan DEBOUNCE
+// REAL-TIME dengan DEBOUNCE & MIN CHANGE
 const PRICE_CHECK_INTERVAL = 2000 // Cek setiap 2 detik
-const DEBOUNCE_TIME = 3000 // Tunggu 3 detik sebelum broadcast (cegah double)
+const DEBOUNCE_TIME = 5000 // 5 detik (dari 3 detik)
+const MIN_PRICE_CHANGE = 50 // Minimal perubahan 50 rupiah untuk broadcast
 let lastKnownPrice = null
+let lastBroadcastedPrice = null // Harga terakhir yang di-broadcast
 let isBroadcasting = false
-let pendingBroadcast = null // Timer untuk debounce
-let latestPriceChange = null // Simpan perubahan terbaru
+let pendingBroadcast = null
+let latestPriceChange = null
 
 // Reconnect settings
 let reconnectAttempts = 0
@@ -220,7 +222,7 @@ function formatMessage(treasuryData, usdIdrData, priceChange = null) {
 
 ${generateDiscountSimulation(buy, sell)}
 
-⚡ _Update real-time saat harga berubah_`
+⚡ _Update real-time (min ±Rp50)_`
 }
 
 function generateDiscountSimulation(buy, sell) {
@@ -280,6 +282,12 @@ async function doBroadcast(priceChange) {
       fetchUSDIDRFromGoogle()
     ])
     
+    // Update last broadcasted price
+    lastBroadcastedPrice = {
+      buy: treasury?.data?.buying_rate,
+      sell: treasury?.data?.selling_rate
+    }
+    
     const message = formatMessage(treasury, usdIdr, priceChange)
     
     console.log(`📤 ${time} Broadcasting to ${subscriptions.size} subs`)
@@ -302,18 +310,15 @@ async function doBroadcast(priceChange) {
   isBroadcasting = false
 }
 
-// Fungsi untuk schedule broadcast dengan debounce
 function scheduleBroadcast(priceChange) {
-  // Cancel pending broadcast jika ada
+  // Cancel pending broadcast
   if (pendingBroadcast) {
     clearTimeout(pendingBroadcast)
-    console.log(`⏸️  Debouncing... (waiting for stable price)`)
   }
   
-  // Simpan perubahan harga terbaru
   latestPriceChange = priceChange
   
-  // Schedule broadcast baru
+  // Schedule broadcast
   pendingBroadcast = setTimeout(async () => {
     await doBroadcast(latestPriceChange)
     pendingBroadcast = null
@@ -335,16 +340,32 @@ async function checkPriceUpdate() {
 
     if (!lastKnownPrice) {
       lastKnownPrice = currentPrice
+      lastBroadcastedPrice = currentPrice
       console.log(`📊 First check: Buy=${formatRupiah(currentPrice.buy)}, Sell=${formatRupiah(currentPrice.sell)}`)
-    } else if (
+      return
+    }
+    
+    // Cek apakah harga berubah
+    if (
       lastKnownPrice.buy !== currentPrice.buy || 
       lastKnownPrice.sell !== currentPrice.sell ||
       lastKnownPrice.updated_at !== currentPrice.updated_at
     ) {
-      // HARGA BERUBAH!
       const priceChange = {
         buyChange: currentPrice.buy - lastKnownPrice.buy,
         sellChange: currentPrice.sell - lastKnownPrice.sell
+      }
+      
+      // Cek perubahan vs harga terakhir yang di-broadcast
+      const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
+      const sellChangeSinceBroadcast = Math.abs(currentPrice.sell - (lastBroadcastedPrice?.sell || currentPrice.sell))
+      
+      // FILTER: Hanya broadcast jika perubahan >= MIN_PRICE_CHANGE
+      if (buyChangeSinceBroadcast < MIN_PRICE_CHANGE && sellChangeSinceBroadcast < MIN_PRICE_CHANGE) {
+        const time = new Date().toISOString().substring(11, 19)
+        console.log(`⏭️  ${time} Price changed but < Rp${MIN_PRICE_CHANGE} (Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)}, Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}) - SKIPPED`)
+        lastKnownPrice = currentPrice
+        return
       }
       
       const time = new Date().toISOString().substring(11, 19)
@@ -357,7 +378,7 @@ async function checkPriceUpdate() {
       
       lastKnownPrice = currentPrice
       
-      // Schedule broadcast dengan debounce (tunggu 3 detik)
+      // Schedule broadcast dengan debounce
       scheduleBroadcast(priceChange)
     }
   } catch (e) {
@@ -365,10 +386,11 @@ async function checkPriceUpdate() {
   }
 }
 
-// Start monitoring setiap 2 detik
+// Start monitoring
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 console.log(`✅ Real-time monitoring: every ${PRICE_CHECK_INTERVAL/1000}s`)
-console.log(`⏱️  Debounce time: ${DEBOUNCE_TIME/1000}s (prevent double broadcast)\n`)
+console.log(`⏱️  Debounce: ${DEBOUNCE_TIME/1000}s (wait for stable price)`)
+console.log(`📊 Min change: ±Rp${MIN_PRICE_CHANGE} (ignore small fluctuations)\n`)
 
 // ------ EXPRESS ------
 const app = express()
@@ -394,8 +416,10 @@ app.get('/stats', (_req, res) => {
     uptime: Math.floor(process.uptime()),
     subs: subscriptions.size,
     lastPrice: lastKnownPrice,
+    lastBroadcasted: lastBroadcastedPrice,
     interval: `${PRICE_CHECK_INTERVAL/1000}s`,
     debounce: `${DEBOUNCE_TIME/1000}s`,
+    minChange: `Rp${MIN_PRICE_CHANGE}`,
     pendingBroadcast: !!pendingBroadcast,
     logs: logs.slice(-15)
   })
@@ -493,14 +517,14 @@ async function start() {
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update real-time (cek setiap 2s, kirim setelah harga stabil 3s).\n\n_Ketik "berhenti" untuk stop._'
+              text: '✅ Sudah berlangganan!\n\n📢 Update real-time (cek 2s, broadcast setelah stabil 5s, min perubahan ±Rp50).\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`+ ${sendTarget.substring(0, 15)}`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 *Langganan Berhasil!*\n\n📢 Update INSTANT saat harga berubah!\n\n_Bot cek setiap 2 detik, broadcast setelah harga stabil 3 detik (cegah double)._\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 *Langganan Berhasil!*\n\n📢 Update INSTANT saat harga berubah!\n\n✅ Cek setiap 2 detik\n✅ Broadcast setelah stabil 5 detik\n✅ Min perubahan ±Rp50\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
