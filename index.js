@@ -22,10 +22,10 @@ const RANDOM_DELAY_MIN = 500
 const RANDOM_DELAY_MAX = 1000
 
 // REAL-TIME dengan DEBOUNCE & MIN CHANGE
-const PRICE_CHECK_INTERVAL = 2000 // Cek setiap 2 detik
-const DEBOUNCE_TIME = 5000 // 5 detik
-const MIN_PRICE_CHANGE = 50 // Minimal perubahan 50 rupiah untuk broadcast
-const MIN_BROADCAST_INTERVAL = 10000 // Minimal 10 detik antar broadcast
+const PRICE_CHECK_INTERVAL = 2000
+const DEBOUNCE_TIME = 5000
+const MIN_PRICE_CHANGE = 50
+const MIN_BROADCAST_INTERVAL = 10000
 
 let lastKnownPrice = null
 let lastBroadcastedPrice = null
@@ -189,7 +189,7 @@ async function fetchUSDIDRFromGoogle() {
 }
 
 async function fetchXAUUSD() {
-  // Method 1: Scrape dari Investing.com dengan struktur yang benar
+  // Method 1: Scrape dari Investing.com
   try {
     const res = await fetch('https://www.investing.com/currencies/xau-usd', {
       headers: { 
@@ -203,8 +203,6 @@ async function fetchXAUUSD() {
     if (res.ok) {
       const html = await res.text()
       
-      // Pattern dari screenshot Investing.com: 3,965.73
-      // Cari harga utama
       let priceMatch = html.match(/([0-9]{1},[0-9]{3}\.[0-9]{2})\s*<\/span>/i)
       if (!priceMatch) {
         priceMatch = html.match(/"last[Pp]rice"[^>]*>([0-9,\.]+)</i)
@@ -219,7 +217,6 @@ async function fetchXAUUSD() {
         if (price > 1000 && price < 10000) {
           let change = 0, changePercent = 0
           
-          // Cari perubahan: +4.68 (+0.12%)
           const changeMatch = html.match(/([+-]?[0-9,\.]+)\s*\(([+-]?[0-9,\.]+)%\)/i)
           if (changeMatch) {
             change = parseFloat(changeMatch[1].replace(/,/g, ''))
@@ -265,26 +262,6 @@ async function fetchXAUUSD() {
     console.log('Google Finance fetch error:', e.message)
   }
   
-  // Method 3: Gunakan API metals-api.com (free tier)
-  try {
-    const res = await fetch('https://metals-api.com/api/latest?access_key=YOUR_API_KEY&base=USD&symbols=XAU', {
-      signal: AbortSignal.timeout(3000)
-    })
-    
-    if (res.ok) {
-      const json = await res.json()
-      if (json?.rates?.XAU) {
-        // Metals API returns inverse (USD per ounce of gold), so we need to inverse it
-        const price = 1 / json.rates.XAU
-        console.log(`✅ XAU/USD from Metals API: $${price.toFixed(2)}`)
-        return { price, change: 0, changePercent: 0 }
-      }
-    }
-  } catch (e) {
-    console.log('Metals API fetch error:', e.message)
-  }
-  
-  // Last fallback
   console.log('⚠️  Using XAU/USD fallback value')
   return { price: 2650, change: 0, changePercent: 0 }
 }
@@ -314,7 +291,6 @@ function formatMessage(treasuryData, usdIdrData, xauUsdData = null, priceChange 
     }
   }
   
-  // Format XAU/USD dengan safety check
   let xauUsdSection = ''
   if (xauUsdData && xauUsdData.price) {
     const xauPrice = xauUsdData.price
@@ -381,7 +357,6 @@ async function fetchTreasury() {
   return json
 }
 
-// ------ DEBOUNCED BROADCAST (FIXED) ------
 async function doBroadcast(priceChange) {
   if (isBroadcasting) {
     pushLog('⏭️  Broadcast already in progress, skipping')
@@ -470,7 +445,6 @@ function scheduleBroadcast(priceChange) {
   }, DEBOUNCE_TIME)
 }
 
-// ------ REAL-TIME PRICE MONITOR (IMPROVED) ------
 async function checkPriceUpdate() {
   if (!isReady || subscriptions.size === 0) return
 
@@ -530,14 +504,12 @@ async function checkPriceUpdate() {
   }
 }
 
-// Start monitoring
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 console.log(`✅ Real-time monitoring: every ${PRICE_CHECK_INTERVAL/1000}s`)
 console.log(`⏱️  Debounce: ${DEBOUNCE_TIME/1000}s (wait for stable price)`)
 console.log(`📊 Min change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`⏰ Min broadcast interval: ${MIN_BROADCAST_INTERVAL/1000}s\n`)
 
-// ------ EXPRESS ------
 const app = express()
 app.use(express.json())
 
@@ -579,7 +551,6 @@ app.listen(PORT, () => {
   console.log(`📊 /stats\n`)
 })
 
-// ------ WHATSAPP ------
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth')
   const { version } = await fetchLatestBaileysVersion()
@@ -662,7 +633,6 @@ async function start() {
 
         const sendTarget = msg.key.remoteJid
         
-        // langganan
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
@@ -673,14 +643,12 @@ async function start() {
             pushLog(`+ ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 *Langganan Berhasil!*\n\n📢 Update INSTANT saat harga berubah!\n\n✅ Cek setiap 2 detik\n✅ Broadcast setelah stabil 5 detik\n✅ Min perubahan ±Rp50\n✅ Min interval 10 detik\n\n_Ketik "berhenti" untuk stop
-                ._'
+              text: '🎉 *Langganan Berhasil!*\n\n📢 Update INSTANT saat harga berubah!\n\n✅ Cek setiap 2 detik\n✅ Broadcast setelah stabil 5 detik\n✅ Min perubahan ±Rp50\n✅ Min interval 10 detik\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
         }
         
-        // berhenti
         if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             subscriptions.delete(sendTarget)
@@ -692,7 +660,6 @@ async function start() {
           continue
         }
         
-        // emas
         if (!/\bemas\b/.test(text)) continue
 
         const now = Date.now()
