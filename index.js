@@ -696,18 +696,7 @@ const SELF_URL = process.env.RENDER_EXTERNAL_URL ||
                  process.env.RAILWAY_STATIC_URL || 
                  `http://localhost:${PORT}`
 
-setInterval(async () => {
-  try {
-    const response = await fetch(SELF_URL)
-    if (response.ok) {
-      pushLog('🏓 Keep-alive ping successful')
-    } else {
-      pushLog(`⚠️  Keep-alive ping returned ${response.status}`)
-    }
-  } catch (e) {
-    pushLog(`⚠️  Keep-alive ping failed: ${e.message}`)
-  }
-}, 2 * 60 * 1000)console.log(`🏓 Keep-alive system enabled (ping every 2 minutes)`)
+console.log(`🏓 Keep-alive system enabled (ping every 2 minutes)`)
 
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth')
