@@ -20,7 +20,7 @@ const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
 
 // ONE BROADCAST PER MINUTE - Kirim langsung saat perubahan pertama di menit baru
-const PRICE_CHECK_INTERVAL = 1000    // Cek setiap 1 detik
+const PRICE_CHECK_INTERVAL = 5000    // Cek setiap 5 detik (optimasi CPU)
 const MIN_PRICE_CHANGE = 1           // Skip perubahan < Rp1
 
 // Konversi troy ounce ke gram
@@ -30,11 +30,16 @@ const TROY_OZ_TO_GRAM = 31.1034768
 const NORMAL_THRESHOLD = 2000
 const NORMAL_LOW_THRESHOLD = 1000
 
+// Cache untuk XAU/USD (optimasi CPU)
+let cachedXAUUSD = null
+let lastXAUUSDFetch = 0
+const XAU_CACHE_DURATION = 30000  // Cache 30 detik
+
 let lastKnownPrice = null
 let lastBroadcastedPrice = null
 let isBroadcasting = false
 let broadcastCount = 0
-let lastBroadcastMinute = -1  // Track menit terakhir broadcast (0-59)
+let lastBroadcastMinute = -1
 
 // Reconnect settings
 let reconnectAttempts = 0
@@ -215,17 +220,10 @@ async function fetchXAUUSDFromInvesting() {
     const res = await fetch('https://www.investing.com/currencies/xau-usd', {
       headers: { 
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Cache-Control': 'max-age=0'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
       },
-      signal: AbortSignal.timeout(8000)
+      signal: AbortSignal.timeout(5000)
     })
     
     if (!res.ok) {
@@ -235,122 +233,43 @@ async function fetchXAUUSDFromInvesting() {
     
     const html = await res.text()
     
-    let price = null
-    const parsedPrices = []
-    
+    // Method 1: data-test attribute (paling reliable)
     let match = html.match(/data-test="instrument-price-last"[^>]*>([0-9,]+\.?[0-9]*)</i)
     if (match?.[1]) {
-      const p = parseFloat(match[1].replace(/,/g, ''))
-      if (p > 1000 && p < 10000) {
-        parsedPrices.push({ method: 'data-test', price: p })
+      const price = parseFloat(match[1].replace(/,/g, ''))
+      if (price > 1000 && price < 10000) {
+        console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)} (method: data-test)`)
+        return price
       }
     }
     
-    match = html.match(/<span[^>]*class="[^"]*last-price-value[^"]*"[^>]*>([0-9,]+\.?[0-9]*)<\/span>/i)
-    if (match?.[1]) {
-      const p = parseFloat(match[1].replace(/,/g, ''))
-      if (p > 1000 && p < 10000) {
-        parsedPrices.push({ method: 'last-price-value', price: p })
-      }
-    }
-    
+    // Method 2: JSON-LD structured data
     match = html.match(/<script type="application\/ld\+json"[^>]*>([^<]+)<\/script>/i)
     if (match?.[1]) {
       try {
         const jsonData = JSON.parse(match[1])
-        if (jsonData.price || jsonData['@graph']?.[0]?.price) {
-          const p = parseFloat(jsonData.price || jsonData['@graph'][0].price)
+        const price = jsonData.price || jsonData['@graph']?.[0]?.price
+        if (price) {
+          const p = parseFloat(price)
           if (p > 1000 && p < 10000) {
-            parsedPrices.push({ method: 'json-ld', price: p })
+            console.log(`✅ XAU/USD from Investing.com: $${p.toFixed(2)} (method: json-ld)`)
+            return p
           }
         }
       } catch (_) {}
     }
     
-    match = html.match(/"price[Ll]ast":\s*"?([0-9,]+\.?[0-9]*)"?/i)
+    // Method 3: JavaScript variable (backup)
+    match = html.match(/"last":\s*([0-9,]+\.?[0-9]*)/i)
     if (match?.[1]) {
-      const p = parseFloat(match[1].replace(/,/g, ''))
-      if (p > 1000 && p < 10000) {
-        parsedPrices.push({ method: 'priceLast-json', price: p })
+      const price = parseFloat(match[1].replace(/,/g, ''))
+      if (price > 1000 && price < 10000) {
+        console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)} (method: js-var)`)
+        return price
       }
     }
     
-    match = html.match(/data-value="([0-9,]+\.?[0-9]*)"/i)
-    if (match?.[1]) {
-      const p = parseFloat(match[1].replace(/,/g, ''))
-      if (p > 1000 && p < 10000) {
-        parsedPrices.push({ method: 'data-value', price: p })
-      }
-    }
-    
-    match = html.match(/(?:bid|ask)[^\d]*([0-9,]+\.[0-9]{2})/i)
-    if (match?.[1]) {
-      const p = parseFloat(match[1].replace(/,/g, ''))
-      if (p > 1000 && p < 10000) {
-        parsedPrices.push({ method: 'bid-ask', price: p })
-      }
-    }
-    
-    match = html.match(/<span[^>]*>([0-9]{1},?[0-9]{3}\.[0-9]{2})<\/span>/i)
-    if (match?.[1]) {
-      const p = parseFloat(match[1].replace(/,/g, ''))
-      if (p > 1000 && p < 10000) {
-        parsedPrices.push({ method: 'generic-span', price: p })
-      }
-    }
-    
-    match = html.match(/<meta[^>]*property="og:price:amount"[^>]*content="([0-9,]+\.?[0-9]*)"/i)
-    if (match?.[1]) {
-      const p = parseFloat(match[1].replace(/,/g, ''))
-      if (p > 1000 && p < 10000) {
-        parsedPrices.push({ method: 'og-meta', price: p })
-      }
-    }
-    
-    if (parsedPrices.length === 0) {
-      console.log('⚠️  Investing.com: No valid prices found')
-      return null
-    }
-    
-    if (parsedPrices.length === 1) {
-      price = parsedPrices[0].price
-      console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)} (method: ${parsedPrices[0].method})`)
-    } else {
-      const priceGroups = new Map()
-      parsedPrices.forEach(({ method, price: p }) => {
-        let foundGroup = false
-        for (const [groupPrice, methods] of priceGroups) {
-          if (Math.abs(groupPrice - p) <= 1.0) {
-            methods.push({ method, price: p })
-            foundGroup = true
-            break
-          }
-        }
-        if (!foundGroup) {
-          priceGroups.set(p, [{ method, price: p }])
-        }
-      })
-      
-      let maxCount = 0
-      let consensusPrice = null
-      for (const [groupPrice, methods] of priceGroups) {
-        if (methods.length > maxCount) {
-          maxCount = methods.length
-          consensusPrice = methods.reduce((sum, m) => sum + m.price, 0) / methods.length
-        }
-      }
-      
-      if (consensusPrice) {
-        price = consensusPrice
-        console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)} (consensus from ${maxCount} methods)`)
-      }
-    }
-    
-    if (price && price > 1000 && price < 10000) {
-      return price
-    }
-    
-    console.log('⚠️  Investing.com: Price validation failed')
+    console.log('⚠️  Investing.com: No valid price found')
     return null
     
   } catch (e) {
@@ -399,6 +318,25 @@ async function fetchXAUUSD() {
   return null
 }
 
+// Cache version untuk mengurangi CPU usage
+async function fetchXAUUSDCached() {
+  const now = Date.now()
+  
+  // Gunakan cache jika masih fresh
+  if (cachedXAUUSD && (now - lastXAUUSDFetch) < XAU_CACHE_DURATION) {
+    return cachedXAUUSD
+  }
+  
+  // Fetch baru
+  const price = await fetchXAUUSD()
+  if (price) {
+    cachedXAUUSD = price
+    lastXAUUSDFetch = now
+  }
+  
+  return cachedXAUUSD
+}
+
 function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) {
   if (!xauUsdPrice) {
     return {
@@ -418,13 +356,13 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
   if (Math.abs(difference) <= NORMAL_LOW_THRESHOLD) {
     status = 'NORMAL'
     emoji = '✅'
-    message = `NORMAL ✅\nHarga Treasury mendekati harga internasional`
+    message = `NORMAL`
   } 
-  // Selisih sedang = NORMAL tapi perlu perhatian
+  // Selisih sedang = NORMAL
   else if (Math.abs(difference) <= NORMAL_THRESHOLD) {
     status = 'NORMAL'
-    emoji = '⚠️'
-    message = `NORMAL ⚠️\nSelisih dalam batas wajar`
+    emoji = '✅'
+    message = `NORMAL`
   } 
   // Selisih besar = ABNORMAL
   else {
@@ -433,7 +371,7 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
     const selisihText = difference > 0 
       ? `+Rp${formatRupiah(Math.round(Math.abs(difference)))}` 
       : `-Rp${formatRupiah(Math.round(Math.abs(difference)))}`
-    message = `ABNORMAL ❌\nSELISIH BESAR: ${selisihText}`
+    message = `ABNORMAL (Selisih: ${selisihText})`
   }
   
   return {
@@ -536,7 +474,7 @@ async function doBroadcast(priceChange) {
     const [treasury, usdIdr, xauUsd] = await Promise.all([
       fetchTreasury(),
       fetchUSDIDRFromGoogle(),
-      fetchXAUUSD()
+      fetchXAUUSDCached()  // Gunakan versi cached
     ])
     
     lastBroadcastedPrice = {
@@ -653,12 +591,13 @@ async function checkPriceUpdate() {
   }
 }
 
-// Cek harga setiap 1 detik
+// Cek harga setiap 5 detik (optimasi CPU dari 1 detik)
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 
 console.log(`✅ One broadcast per minute - Send immediately on first change`)
 console.log(`📊 Price check: every ${PRICE_CHECK_INTERVAL/1000}s`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
+console.log(`🔧 XAU/USD cache: ${XAU_CACHE_DURATION/1000}s`)
 console.log(`🌍 XAU/USD: TradingView → Investing → Google\n`)
 
 const app = express()
@@ -687,6 +626,7 @@ app.get('/stats', (_req, res) => {
     lastBroadcasted: lastBroadcastedPrice,
     broadcastCount: broadcastCount,
     lastBroadcastMinute: lastBroadcastMinute,
+    cachedXAUUSD: cachedXAUUSD,
     logs: logs.slice(-20)
   })
 })
@@ -700,6 +640,19 @@ app.listen(PORT, () => {
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || 
                  process.env.RAILWAY_STATIC_URL || 
                  `http://localhost:${PORT}`
+
+setInterval(async () => {
+  try {
+    const response = await fetch(SELF_URL)
+    if (response.ok) {
+      pushLog('🏓 Keep-alive ping successful')
+    } else {
+      pushLog(`⚠️  Keep-alive ping returned ${response.status}`)
+    }
+  } catch (e) {
+    pushLog(`⚠️  Keep-alive ping failed: ${e.message}`)
+  }
+}, 2 * 60 * 1000)
 
 console.log(`🏓 Keep-alive system enabled (ping every 2 minutes)`)
 
@@ -831,7 +784,7 @@ async function start() {
           const [treasury, usdIdr, xauUsd] = await Promise.all([
             fetchTreasury(),
             fetchUSDIDRFromGoogle(),
-            fetchXAUUSD()
+            fetchXAUUSDCached()  // Gunakan cached version
           ])
           replyText = formatMessage(treasury, usdIdr.rate, xauUsd, null)
         } catch (e) {
