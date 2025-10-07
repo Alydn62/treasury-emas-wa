@@ -19,9 +19,10 @@ const COOLDOWN_PER_CHAT = 60000
 const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
 
-// ONE BROADCAST PER MINUTE
+// BROADCAST COOLDOWN
 const PRICE_CHECK_INTERVAL = 5000
 const MIN_PRICE_CHANGE = 1
+const BROADCAST_COOLDOWN = 50000 // 50 detik antar broadcast
 
 // Economic Calendar Settings
 const ECONOMIC_CALENDAR_ENABLED = true
@@ -53,7 +54,7 @@ let lastKnownPrice = null
 let lastBroadcastedPrice = null
 let isBroadcasting = false
 let broadcastCount = 0
-let lastBroadcastMinute = -1
+let lastBroadcastTime = 0
 
 // Reconnect settings
 let reconnectAttempts = 0
@@ -738,10 +739,11 @@ async function checkPriceUpdate() {
       return
     }
     
-    const now = new Date()
-    const currentMinute = now.getMinutes()
+    const now = Date.now()
+    const timeSinceLastBroadcast = now - lastBroadcastTime
     
-    if (currentMinute === lastBroadcastMinute) {
+    // Jangan broadcast jika baru saja broadcast dalam 50 detik terakhir
+    if (timeSinceLastBroadcast < BROADCAST_COOLDOWN) {
       const priceChange = {
         buyChange: currentPrice.buy - lastKnownPrice.buy,
         sellChange: currentPrice.sell - lastKnownPrice.sell
@@ -753,24 +755,9 @@ async function checkPriceUpdate() {
       const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
       const sellIcon = priceChange.sellChange > 0 ? '📈' : '📉'
       
-      pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)} (⏳ Wait next minute)`)
-      return
-    }
+pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
     
-    const priceChange = {
-      buyChange: currentPrice.buy - lastKnownPrice.buy,
-      sellChange: currentPrice.sell - lastKnownPrice.sell
-    }
-    
-    lastKnownPrice = currentPrice
-    
-    const time = new Date().toISOString().substring(11, 19)
-    const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
-    const sellIcon = priceChange.sellChange > 0 ? '📈' : '📉'
-    
-    pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
-    
-    lastBroadcastMinute = currentMinute
+    lastBroadcastTime = now
     
     const finalPriceChange = {
       buyChange: currentPrice.buy - lastBroadcastedPrice.buy,
@@ -787,7 +774,7 @@ async function checkPriceUpdate() {
 
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 
-console.log(`✅ One broadcast per minute - Send immediately on first change`)
+console.log(`✅ Broadcast cooldown: ${BROADCAST_COOLDOWN/1000}s`)
 console.log(`📊 Price check: every ${PRICE_CHECK_INTERVAL/1000}s`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`🔧 XAU/USD cache: ${XAU_CACHE_DURATION/1000}s`)
@@ -834,7 +821,8 @@ app.get('/stats', (_req, res) => {
     lastPrice: lastKnownPrice,
     lastBroadcasted: lastBroadcastedPrice,
     broadcastCount: broadcastCount,
-    lastBroadcastMinute: lastBroadcastMinute,
+    lastBroadcastTime: new Date(lastBroadcastTime).toISOString(),
+    timeSinceLastBroadcast: lastBroadcastTime > 0 ? Math.floor((Date.now() - lastBroadcastTime) / 1000) : null,
     cachedXAUUSD: cachedXAUUSD,
     cachedEconomicEvents: cachedEconomicEvents,
     wsConnected: sock?.ws?.readyState === 1,
@@ -997,14 +985,14 @@ async function start() {
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Max 1x broadcast per menit\n📅 Termasuk kalender ekonomi USD'
+              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Max 1x broadcast per 50 detik\n📅 Termasuk kalender ekonomi USD'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`➕ New sub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Kirim langsung di perubahan pertama setiap menit\n📅 Termasuk kalender ekonomi USD high-impact\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Max 1x broadcast per 50 detik\n📅 Termasuk kalender ekonomi USD high-impact\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
