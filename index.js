@@ -19,11 +19,10 @@ const COOLDOWN_PER_CHAT = 60000
 const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
 
-// REAL-TIME dengan DEBOUNCE & MIN CHANGE
-const PRICE_CHECK_INTERVAL = 2000
-const DEBOUNCE_TIME = 5000
+// REAL-TIME INSTANT BROADCAST - TANPA DEBOUNCE
+const PRICE_CHECK_INTERVAL = 1000  // Cek setiap 1 detik untuk lebih responsive
 const MIN_PRICE_CHANGE = 50
-const MIN_BROADCAST_INTERVAL = 10000
+const MIN_BROADCAST_INTERVAL = 3000  // Minimal 3 detik antar broadcast untuk avoid spam
 
 // Konversi troy ounce ke gram
 const TROY_OZ_TO_GRAM = 31.1034768
@@ -36,8 +35,6 @@ let lastKnownPrice = null
 let lastBroadcastedPrice = null
 let lastBroadcastTime = 0
 let isBroadcasting = false
-let pendingBroadcast = null
-let latestPriceChange = null
 let broadcastCount = 0
 
 // Reconnect settings
@@ -220,35 +217,161 @@ async function fetchXAUUSDFromInvesting() {
       headers: { 
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5'
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'max-age=0'
       },
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(8000)
     })
     
-    if (res.ok) {
-      const html = await res.text()
-      
-      let priceMatch = html.match(/data-test="instrument-price-last"[^>]*>([0-9,\.]+)</i)
-      if (!priceMatch) {
-        priceMatch = html.match(/([0-9]{1},[0-9]{3}\.[0-9]{2})\s*<\/span>/i)
-      }
-      if (!priceMatch) {
-        priceMatch = html.match(/"last[Pp]rice"[^>]*>([0-9,\.]+)</i)
-      }
-      
-      if (priceMatch?.[1]) {
-        const price = parseFloat(priceMatch[1].replace(/,/g, ''))
-        
-        if (price > 1000 && price < 10000) {
-          console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)}`)
-          return price
-        }
+    if (!res.ok) {
+      console.log(`❌ Investing.com HTTP ${res.status}`)
+      return null
+    }
+    
+    const html = await res.text()
+    
+    let price = null
+    const parsedPrices = []
+    
+    // METHOD 1: data-test attribute (most reliable)
+    let match = html.match(/data-test="instrument-price-last"[^>]*>([0-9,]+\.?[0-9]*)</i)
+    if (match?.[1]) {
+      const p = parseFloat(match[1].replace(/,/g, ''))
+      if (p > 1000 && p < 10000) {
+        parsedPrices.push({ method: 'data-test', price: p })
       }
     }
+    
+    // METHOD 2: Specific price pattern with span
+    match = html.match(/<span[^>]*class="[^"]*last-price-value[^"]*"[^>]*>([0-9,]+\.?[0-9]*)<\/span>/i)
+    if (match?.[1]) {
+      const p = parseFloat(match[1].replace(/,/g, ''))
+      if (p > 1000 && p < 10000) {
+        parsedPrices.push({ method: 'last-price-value', price: p })
+      }
+    }
+    
+    // METHOD 3: JSON-LD structured data
+    match = html.match(/<script type="application\/ld\+json"[^>]*>([^<]+)<\/script>/i)
+    if (match?.[1]) {
+      try {
+        const jsonData = JSON.parse(match[1])
+        if (jsonData.price || jsonData['@graph']?.[0]?.price) {
+          const p = parseFloat(jsonData.price || jsonData['@graph'][0].price)
+          if (p > 1000 && p < 10000) {
+            parsedPrices.push({ method: 'json-ld', price: p })
+          }
+        }
+      } catch (_) {}
+    }
+    
+    // METHOD 4: Price in quotes pattern
+    match = html.match(/"price[Ll]ast":\s*"?([0-9,]+\.?[0-9]*)"?/i)
+    if (match?.[1]) {
+      const p = parseFloat(match[1].replace(/,/g, ''))
+      if (p > 1000 && p < 10000) {
+        parsedPrices.push({ method: 'priceLast-json', price: p })
+      }
+    }
+    
+    // METHOD 5: Alternative data attribute
+    match = html.match(/data-value="([0-9,]+\.?[0-9]*)"/i)
+    if (match?.[1]) {
+      const p = parseFloat(match[1].replace(/,/g, ''))
+      if (p > 1000 && p < 10000) {
+        parsedPrices.push({ method: 'data-value', price: p })
+      }
+    }
+    
+    // METHOD 6: Bid/Ask price as fallback
+    match = html.match(/(?:bid|ask)[^\d]*([0-9,]+\.[0-9]{2})/i)
+    if (match?.[1]) {
+      const p = parseFloat(match[1].replace(/,/g, ''))
+      if (p > 1000 && p < 10000) {
+        parsedPrices.push({ method: 'bid-ask', price: p })
+      }
+    }
+    
+    // METHOD 7: Generic price span pattern
+    match = html.match(/<span[^>]*>([0-9]{1},?[0-9]{3}\.[0-9]{2})<\/span>/i)
+    if (match?.[1]) {
+      const p = parseFloat(match[1].replace(/,/g, ''))
+      if (p > 1000 && p < 10000) {
+        parsedPrices.push({ method: 'generic-span', price: p })
+      }
+    }
+    
+    // METHOD 8: Look for price in meta tags
+    match = html.match(/<meta[^>]*property="og:price:amount"[^>]*content="([0-9,]+\.?[0-9]*)"/i)
+    if (match?.[1]) {
+      const p = parseFloat(match[1].replace(/,/g, ''))
+      if (p > 1000 && p < 10000) {
+        parsedPrices.push({ method: 'og-meta', price: p })
+      }
+    }
+    
+    if (parsedPrices.length === 0) {
+      console.log('⚠️  Investing.com: No valid prices found')
+      return null
+    }
+    
+    // CONSENSUS ALGORITHM: Pilih harga yang paling sering muncul atau ambil median
+    if (parsedPrices.length === 1) {
+      price = parsedPrices[0].price
+      console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)} (method: ${parsedPrices[0].method})`)
+    } else {
+      // Kelompokkan harga yang mirip (toleransi $1)
+      const priceGroups = new Map()
+      parsedPrices.forEach(({ method, price: p }) => {
+        let foundGroup = false
+        for (const [groupPrice, methods] of priceGroups) {
+          if (Math.abs(groupPrice - p) <= 1.0) {
+            methods.push({ method, price: p })
+            foundGroup = true
+            break
+          }
+        }
+        if (!foundGroup) {
+          priceGroups.set(p, [{ method, price: p }])
+        }
+      })
+      
+      // Ambil grup dengan jumlah terbanyak
+      let maxCount = 0
+      let consensusPrice = null
+      for (const [groupPrice, methods] of priceGroups) {
+        if (methods.length > maxCount) {
+          maxCount = methods.length
+          // Gunakan rata-rata dari grup
+          consensusPrice = methods.reduce((sum, m) => sum + m.price, 0) / methods.length
+        }
+      }
+      
+      if (consensusPrice) {
+        price = consensusPrice
+        console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)} (consensus from ${maxCount} methods)`)
+        console.log(`   Parsed prices:`, parsedPrices.map(p => `${p.method}=$${p.price.toFixed(2)}`).join(', '))
+      }
+    }
+    
+    // Validasi final: harga harus masuk akal
+    if (price && price > 1000 && price < 10000) {
+      return price
+    }
+    
+    console.log('⚠️  Investing.com: Price validation failed')
+    return null
+    
   } catch (e) {
-    console.log('Investing.com fetch error:', e.message)
+    console.log('❌ Investing.com fetch error:', e.message)
+    return null
   }
-  return null
 }
 
 async function fetchXAUUSDFromGoogle() {
@@ -349,11 +472,12 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
   let timeSection = ''
   if (updatedAt) {
     const date = new Date(updatedAt)
-    // Format: HH:MM:SS WIB
+    // Format: DD:HH:MM:SS WIB
+    const day = date.getDate().toString().padStart(2, '0')
     const hours = date.getHours().toString().padStart(2, '0')
     const minutes = date.getMinutes().toString().padStart(2, '0')
     const seconds = date.getSeconds().toString().padStart(2, '0')
-    timeSection = `🕐 *Update: ${hours}:${minutes}:${seconds} WIB*\n`
+    timeSection = `🕐 *Update: ${day}:${hours}:${minutes}:${seconds} WIB*\n`
   }
   
   // Header untuk naik/turun
@@ -467,7 +591,7 @@ async function doBroadcast(priceChange) {
       try {
         await sock.sendMessage(chatId, { text: message })
         successCount++
-        await new Promise(r => setTimeout(r, 1000))
+        await new Promise(r => setTimeout(r, 500))  // 500ms delay antar message
       } catch (e) {
         failCount++
         pushLog(`❌ Failed: ${chatId.substring(0, 15)}`)
@@ -482,22 +606,6 @@ async function doBroadcast(priceChange) {
   }
   
   isBroadcasting = false
-}
-
-function scheduleBroadcast(priceChange) {
-  if (pendingBroadcast) {
-    clearTimeout(pendingBroadcast)
-    pushLog('⏱️  Debounce reset (price still changing)')
-  }
-  
-  latestPriceChange = priceChange
-  
-  pendingBroadcast = setTimeout(async () => {
-    pushLog('✓ Price stabilized, broadcasting...')
-    await doBroadcast(latestPriceChange)
-    pendingBroadcast = null
-    latestPriceChange = null
-  }, DEBOUNCE_TIME)
 }
 
 async function checkPriceUpdate() {
@@ -552,7 +660,8 @@ async function checkPriceUpdate() {
     pushLog(`${buyIcon} Buy: ${formatRupiah(lastKnownPrice.buy - priceChange.buyChange)} → ${formatRupiah(currentPrice.buy)} (${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)})`)
     pushLog(`${sellIcon} Sell: ${formatRupiah(lastKnownPrice.sell - priceChange.sellChange)} → ${formatRupiah(currentPrice.sell)} (${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)})`)
     
-    scheduleBroadcast(priceChange)
+    // INSTANT BROADCAST - Langsung kirim tanpa debounce
+    await doBroadcast(priceChange)
     
   } catch (e) {
     // Silent fail
@@ -560,10 +669,10 @@ async function checkPriceUpdate() {
 }
 
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
-console.log(`✅ Real-time monitoring: every ${PRICE_CHECK_INTERVAL/1000}s`)
-console.log(`⏱️  Debounce: ${DEBOUNCE_TIME/1000}s`)
+console.log(`✅ INSTANT Real-time monitoring: every ${PRICE_CHECK_INTERVAL/1000}s`)
+console.log(`⚡ ZERO DELAY - Instant broadcast on price change`)
 console.log(`📊 Min change: ±Rp${MIN_PRICE_CHANGE}`)
-console.log(`⏰ Min broadcast interval: ${MIN_BROADCAST_INTERVAL/1000}s`)
+console.log(`⏰ Min broadcast interval: ${MIN_BROADCAST_INTERVAL/1000}s (anti-spam)`)
 console.log(`🌍 XAU/USD: TradingView → Investing → Google\n`)
 
 const app = express()
@@ -732,7 +841,7 @@ async function start() {
           ])
           replyText = formatMessage(treasury, usdIdr.rate, xauUsd, null)
         } catch (e) {
-replyText = '❌ Gagal mengambil data harga.'
+          replyText = '❌ Gagal mengambil data harga.'
         }
 
         await new Promise(r => setTimeout(r, 500))
