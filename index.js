@@ -15,7 +15,7 @@ const TREASURY_URL = process.env.TREASURY_URL ||
   'https://api.treasury.id/api/v1/antigrvty/gold/rate'
 
 // Anti-spam settings
-const COOLDOWN_PER_CHAT = 60000 // 1 menit per chat (DM atau Grup)
+const COOLDOWN_PER_CHAT = 60000 // 1 menit
 const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 6000
 const RANDOM_DELAY_MIN = 2000
@@ -30,9 +30,14 @@ const BASE_RECONNECT_DELAY = 5000
 let lastQr = null
 const logs = []
 const processedMsgIds = new Set()
-const lastReplyAtPerChat = new Map() // Menyimpan last reply per chat (DM atau Grup)
+const lastReplyAtPerChat = new Map()
 let lastGlobalReplyAt = 0
 let isReady = false
+let sock = null // Store socket instance
+
+// Subscription state - Menyimpan daftar chat yang berlangganan
+const subscriptions = new Set() // Format: '628123456789@s.whatsapp.net' atau '12345@g.us'
+let lastBroadcastHour = -1 // Track jam terakhir broadcast
 
 function pushLog(s) {
   logs.push(`${new Date().toISOString()} ${s}`)
@@ -55,7 +60,6 @@ function normalizeText(msg) {
 }
 
 function isGroupMessage(m) {
-  // Grup ID format: xxxxx@g.us
   return m.key.remoteJid?.endsWith('@g.us')
 }
 
@@ -251,8 +255,70 @@ async function fetchTreasury() {
   throw lastErr
 }
 
+// ------ SUBSCRIPTION BROADCAST ------
+async function broadcastToSubscribers() {
+  if (!sock || !isReady || subscriptions.size === 0) {
+    return
+  }
+
+  console.log(`📢 Broadcasting to ${subscriptions.size} subscribers...`)
+  pushLog(`Broadcasting to ${subscriptions.size} subscribers`)
+
+  try {
+    // Fetch data
+    const [treasury, usdIdr] = await Promise.all([
+      fetchTreasury(),
+      fetchUSDIDRFromGoogle()
+    ])
+    
+    const message = formatMessage(treasury, usdIdr)
+    
+    // Kirim ke semua subscriber dengan delay
+    let successCount = 0
+    let failCount = 0
+    
+    for (const chatId of subscriptions) {
+      try {
+        await sock.sendMessage(chatId, { text: message })
+        successCount++
+        console.log(`✅ Broadcast sent to ${chatId}`)
+        
+        // Delay antar pengiriman untuk menghindari spam
+        await new Promise(r => setTimeout(r, 2000))
+      } catch (e) {
+        failCount++
+        console.log(`❌ Failed to send to ${chatId}: ${e.message}`)
+        pushLog(`Broadcast failed: ${chatId}`)
+      }
+    }
+    
+    console.log(`📊 Broadcast complete: ${successCount} success, ${failCount} failed`)
+    pushLog(`Broadcast: ${successCount} success, ${failCount} failed`)
+    
+  } catch (e) {
+    console.error('❌ Broadcast error:', e)
+    pushLog(`Broadcast error: ${e.message}`)
+  }
+}
+
+// Cek setiap detik apakah sudah waktunya broadcast
+setInterval(() => {
+  const now = new Date()
+  const currentHour = now.getHours()
+  const currentMinute = now.getMinutes()
+  const currentSecond = now.getSeconds()
+  
+  // Broadcast setiap jam di detik 01 (XX:00:01)
+  if (currentMinute === 0 && currentSecond === 1 && currentHour !== lastBroadcastHour) {
+    lastBroadcastHour = currentHour
+    console.log(`⏰ Broadcast time: ${currentHour}:00:01`)
+    broadcastToSubscribers()
+  }
+}, 1000) // Cek setiap 1 detik
+
 // ------ EXPRESS ------
 const app = express()
+app.use(express.json())
 
 app.get('/', (_req, res) => {
   res.type('text/plain').send('✅ Bot WhatsApp Emas is running')
@@ -287,8 +353,14 @@ app.get('/stats', (_req, res) => {
     status: isReady ? '🟢 Online' : '🔴 Warming up',
     uptime: Math.floor(process.uptime()),
     totalChats: lastReplyAtPerChat.size,
+    totalSubscribers: subscriptions.size,
+    subscribers: Array.from(subscriptions).map(id => ({
+      id: id.substring(0, 25) + '...',
+      type: id.endsWith('@g.us') ? 'GROUP' : 'DM'
+    })),
     processedMessages: processedMsgIds.size,
     reconnectAttempts,
+    lastBroadcastHour,
     activeChats: Array.from(lastReplyAtPerChat.entries())
       .slice(-10)
       .map(([chat, lastTime]) => ({
@@ -300,6 +372,31 @@ app.get('/stats', (_req, res) => {
     recentLogs: logs.slice(-15)
   }
   res.json(stats)
+})
+
+app.get('/subscribers', (_req, res) => {
+  res.json({
+    total: subscriptions.size,
+    subscribers: Array.from(subscriptions)
+  })
+})
+
+app.post('/subscribe', (req, res) => {
+  const { chatId } = req.body
+  if (!chatId) {
+    return res.status(400).json({ error: 'chatId required' })
+  }
+  subscriptions.add(chatId)
+  res.json({ success: true, total: subscriptions.size })
+})
+
+app.post('/unsubscribe', (req, res) => {
+  const { chatId } = req.body
+  if (!chatId) {
+    return res.status(400).json({ error: 'chatId required' })
+  }
+  subscriptions.delete(chatId)
+  res.json({ success: true, total: subscriptions.size })
 })
 
 app.get('/test', async (_req, res) => {
@@ -319,6 +416,7 @@ app.get('/test', async (_req, res) => {
 app.listen(PORT, () => {
   console.log(`🌐 Server running on port ${PORT}`)
   console.log(`📊 Stats: http://localhost:${PORT}/stats`)
+  console.log(`👥 Subscribers: http://localhost:${PORT}/subscribers`)
   console.log(`🧪 Test: http://localhost:${PORT}/test`)
   console.log(`📱 QR: http://localhost:${PORT}/qr`)
 })
@@ -330,7 +428,7 @@ async function start() {
 
   const logger = pino({ level: 'silent' })
 
-  const sock = makeWASocket({
+  sock = makeWASocket({
     version,
     logger,
     printQRInTerminal: false,
@@ -370,16 +468,14 @@ async function start() {
       console.log(`❌ Connection closed: ${reason}`)
       pushLog(`Closed: ${reason}`)
       
-      // HANYA jangan reconnect jika BENAR-BENAR logout
       if (reason === DisconnectReason.loggedOut) {
         console.log('⚠️  LOGGED OUT - Scan QR at /qr')
-        pushLog('LOGGED OUT - need QR scan')
+        pushLog('LOGGED OUT')
         lastQr = null
         reconnectAttempts = 0
         return
       }
       
-      // Untuk error lain, reconnect
       if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         const delay = BASE_RECONNECT_DELAY * Math.pow(1.5, reconnectAttempts)
         reconnectAttempts++
@@ -391,8 +487,8 @@ async function start() {
           start()
         }, delay)
       } else {
-        console.log('❌ Max reconnect attempts reached')
-        pushLog('Max reconnect attempts')
+        console.log('❌ Max reconnect attempts')
+        pushLog('Max reconnect')
         process.exit(1)
       }
       
@@ -428,44 +524,77 @@ async function start() {
         processedMsgIds.add(stanzaId)
 
         const text = normalizeText(extractText(msg))
-        if (!text || !/\bemas\b/.test(text)) continue
+        if (!text) continue
 
         const sendTarget = msg.key.remoteJid
         const isGroup = isGroupMessage(msg)
+        
+        // Command: langganan atau subscribe
+        if (/\blangganan\b|\bsubscribe\b/.test(text)) {
+          if (subscriptions.has(sendTarget)) {
+            await sock.sendMessage(sendTarget, {
+              text: '✅ Anda sudah berlangganan!\n\n📢 Anda akan menerima update harga emas otomatis setiap jam.\n\n_Ketik "berhenti" untuk berhenti langganan._'
+            }, { quoted: msg })
+          } else {
+            subscriptions.add(sendTarget)
+            console.log(`➕ New subscriber: ${sendTarget}`)
+            pushLog(`New subscriber: ${isGroup ? 'GROUP' : 'DM'}`)
+            
+            await sock.sendMessage(sendTarget, {
+              text: '🎉 *Langganan Berhasil!*\n\n📢 Anda akan menerima update harga emas otomatis setiap jam di detik ke-01.\n\n_Ketik "berhenti" untuk berhenti langganan._'
+            }, { quoted: msg })
+          }
+          continue
+        }
+        
+        // Command: berhenti atau unsubscribe
+        if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
+          if (subscriptions.has(sendTarget)) {
+            subscriptions.delete(sendTarget)
+            console.log(`➖ Unsubscribed: ${sendTarget}`)
+            pushLog(`Unsubscribed: ${isGroup ? 'GROUP' : 'DM'}`)
+            
+            await sock.sendMessage(sendTarget, {
+              text: '👋 Langganan dihentikan.\n\n_Ketik "langganan" untuk berlangganan kembali._'
+            }, { quoted: msg })
+          } else {
+            await sock.sendMessage(sendTarget, {
+              text: '❌ Anda belum berlangganan.\n\n_Ketik "langganan" untuk mulai berlangganan._'
+            }, { quoted: msg })
+          }
+          continue
+        }
+        
+        // Trigger: emas
+        if (!/\bemas\b/.test(text)) continue
+
         const now = Date.now()
         
-        // Log untuk debugging
         console.log(`📨 Message from: ${isGroup ? 'GROUP' : 'DM'} | ${sendTarget}`)
-        pushLog(`Message: ${isGroup ? 'GROUP' : 'DM'} | ${text.substring(0, 30)}`)
+        pushLog(`Message: ${isGroup ? 'GROUP' : 'DM'}`)
         
-        // PENTING: Cooldown per chat (1 menit untuk DM ATAU Grup)
-        // Jika di grup, siapapun yang ketik "emas" dalam 1 menit akan di-ignore
         const lastReply = lastReplyAtPerChat.get(sendTarget) || 0
         const timeSinceLastReply = now - lastReply
         
         if (timeSinceLastReply < COOLDOWN_PER_CHAT) {
           const remaining = Math.ceil((COOLDOWN_PER_CHAT - timeSinceLastReply) / 1000)
-          console.log(`⏳ Cooldown: ${isGroup ? 'GROUP' : 'DM'} ${sendTarget} (${remaining}s remaining)`)
+          console.log(`⏳ Cooldown: ${remaining}s`)
           pushLog(`Cooldown: ${remaining}s`)
-          continue // Skip pesan ini
+          continue
         }
         
-        // Global throttle
         if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) {
-          pushLog('Global throttle active')
           continue
         }
 
-        pushLog(`Processing: ${isGroup ? 'GROUP' : 'DM'}`)
+        pushLog(`Processing`)
 
-        // Typing indicator
         try {
           await sock.sendPresenceUpdate('composing', sendTarget)
         } catch (_) {}
         
         await new Promise(r => setTimeout(r, TYPING_DURATION))
 
-        // Fetch data
         let replyText
         try {
           const [treasury, usdIdr] = await Promise.all([
@@ -474,39 +603,35 @@ async function start() {
           ])
           
           replyText = formatMessage(treasury, usdIdr)
-          pushLog('Data fetched')
+          pushLog('Fetched')
         } catch (e) {
           replyText = '❌ Gagal mengambil data.\n⏱️ Coba lagi nanti.'
-          pushLog(`Fetch error: ${e.message}`)
+          pushLog(`Error: ${e.message}`)
         }
 
-        // Random delay
         const randomDelay = Math.floor(Math.random() * (RANDOM_DELAY_MAX - RANDOM_DELAY_MIN)) + RANDOM_DELAY_MIN
         await new Promise(r => setTimeout(r, randomDelay))
         
-        // Stop typing
         try {
           await sock.sendPresenceUpdate('paused', sendTarget)
         } catch (_) {}
         
-        // Send message
         await sock.sendMessage(
           sendTarget,
           { text: replyText },
-          { quoted: msg } // Reply ke pesan yang trigger bot
+          { quoted: msg }
         )
 
-        // PENTING: Update last reply time untuk chat ini
         lastReplyAtPerChat.set(sendTarget, now)
         lastGlobalReplyAt = now
         
-        console.log(`✅ Sent to ${isGroup ? 'GROUP' : 'DM'}: ${sendTarget}`)
-        pushLog(`Sent to ${isGroup ? 'GROUP' : 'DM'}`)
+        console.log(`✅ Sent to ${isGroup ? 'GROUP' : 'DM'}`)
+        pushLog(`Sent`)
         
         await new Promise(r => setTimeout(r, 2000))
         
       } catch (e) {
-        pushLog(`Handler error: ${e.message}`)
+        pushLog(`Error: ${e.message}`)
         console.error('Error:', e)
         await new Promise(r => setTimeout(r, 5000))
       }
