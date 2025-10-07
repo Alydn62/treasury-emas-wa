@@ -337,12 +337,34 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
   }
 }
 
-function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null) {
+function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange = null) {
   const buy = treasuryData?.data?.buying_rate || 0
   const sell = treasuryData?.data?.selling_rate || 0
   
   const spread = sell - buy
   const spreadPercent = ((spread / buy) * 100).toFixed(2)
+  
+  // Waktu update dari API (WIB/Jakarta)
+  const updatedAt = treasuryData?.data?.updated_at
+  let timeSection = ''
+  if (updatedAt) {
+    const date = new Date(updatedAt)
+    // Format: HH:MM:SS WIB
+    const hours = date.getHours().toString().padStart(2, '0')
+    const minutes = date.getMinutes().toString().padStart(2, '0')
+    const seconds = date.getSeconds().toString().padStart(2, '0')
+    timeSection = `🕐 *Update: ${hours}:${minutes}:${seconds} WIB*\n`
+  }
+  
+  // Header untuk naik/turun
+  let headerSection = ''
+  if (priceChange && priceChange.buyChange !== 0) {
+    if (priceChange.buyChange > 0) {
+      headerSection = '*HARGA NAIK 🚀 🚀 🚀 🚀*\n'
+    } else {
+      headerSection = '*HARGA TURUN 🔻 🔻 🔻 🔻*\n'
+    }
+  }
   
   let statusSection = ''
   
@@ -364,7 +386,7 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null) {
     marketSection += `💰 XAU/USD: $${xauUsdPrice.toFixed(2)}/oz`
   }
   
-  return `${statusSection}
+  return `${headerSection}${timeSection}${statusSection}
 📊 *Harga Beli:* ${buyFormatted}
 📉 *Harga Jual:* ${sellFormatted}
 💬 *Selisih:* ${spreadFormatted}
@@ -434,7 +456,7 @@ async function doBroadcast(priceChange) {
       sell: treasury?.data?.selling_rate
     }
     
-    const message = formatMessage(treasury, usdIdr.rate, xauUsd)
+    const message = formatMessage(treasury, usdIdr.rate, xauUsd, priceChange)
     
     pushLog(`📤 [#${currentBroadcastId}] Broadcasting to ${subscriptions.size} subs`)
     
@@ -708,32 +730,9 @@ async function start() {
             fetchUSDIDRFromGoogle(),
             fetchXAUUSD()
           ])
-          replyText = formatMessage(treasury, usdIdr.rate, xauUsd)
+          replyText = formatMessage(treasury, usdIdr.rate, xauUsd, null)
         } catch (e) {
           replyText = '❌ Gagal mengambil data harga.'
         }
 
-        await new Promise(r => setTimeout(r, 500))
-        
-        try {
-          await sock.sendPresenceUpdate('paused', sendTarget)
-        } catch (_) {}
-        
-        await sock.sendMessage(sendTarget, { text: replyText }, { quoted: msg })
-
-        lastReplyAtPerChat.set(sendTarget, now)
-        lastGlobalReplyAt = now
-        
-        await new Promise(r => setTimeout(r, 1000))
-        
-      } catch (e) {
-        pushLog(`Error: ${e.message}`)
-      }
-    }
-  })
-}
-
-start().catch(e => {
-  console.error('Fatal:', e)
-  process.exit(1)
-})
+        await new Promise(r => setTimeout(
