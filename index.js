@@ -19,9 +19,18 @@ const COOLDOWN_PER_CHAT = 60000
 const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
 
-// ONE BROADCAST PER MINUTE - Kirim langsung saat perubahan pertama di menit baru
-const PRICE_CHECK_INTERVAL = 5000    // Cek setiap 5 detik (optimasi CPU)
-const MIN_PRICE_CHANGE = 1           // Skip perubahan < Rp1
+// ONE BROADCAST PER MINUTE
+const PRICE_CHECK_INTERVAL = 5000
+const MIN_PRICE_CHANGE = 1
+
+// Economic Calendar Settings
+const ECONOMIC_CALENDAR_ENABLED = true
+const CALENDAR_COUNTRY_FILTER = ['USD']
+const CALENDAR_MIN_IMPACT = 3
+
+// Broadcast Settings
+const BATCH_SIZE = 20 // Max messages per batch
+const BATCH_DELAY = 1000 // Delay between batches (ms)
 
 // Konversi troy ounce ke gram
 const TROY_OZ_TO_GRAM = 31.1034768
@@ -30,10 +39,15 @@ const TROY_OZ_TO_GRAM = 31.1034768
 const NORMAL_THRESHOLD = 2000
 const NORMAL_LOW_THRESHOLD = 1000
 
-// Cache untuk XAU/USD (optimasi CPU)
+// Cache untuk XAU/USD
 let cachedXAUUSD = null
 let lastXAUUSDFetch = 0
-const XAU_CACHE_DURATION = 30000  // Cache 30 detik
+const XAU_CACHE_DURATION = 30000
+
+// Cache untuk Economic Calendar
+let cachedEconomicEvents = null
+let lastEconomicFetch = 0
+const ECONOMIC_CACHE_DURATION = 600000
 
 let lastKnownPrice = null
 let lastBroadcastedPrice = null
@@ -144,6 +158,102 @@ function calculateProfit(buyRate, sellRate, investmentAmount) {
   }
 }
 
+// ------ ECONOMIC CALENDAR FUNCTIONS ------
+async function fetchEconomicCalendar() {
+  if (!ECONOMIC_CALENDAR_ENABLED) return null
+  
+  const now = Date.now()
+  
+  if (cachedEconomicEvents && (now - lastEconomicFetch) < ECONOMIC_CACHE_DURATION) {
+    return cachedEconomicEvents
+  }
+  
+  try {
+    const res = await fetch('https://nfs.faireconomy.media/ff_calendar_thisweek.json', {
+      signal: AbortSignal.timeout(5000)
+    })
+    
+    if (!res.ok) {
+      pushLog('❌ Economic calendar fetch failed')
+      return null
+    }
+    
+    const events = await res.json()
+    
+    const today = new Date()
+    const year = today.getFullYear()
+    const month = String(today.getMonth() + 1).padStart(2, '0')
+    const day = String(today.getDate()).padStart(2, '0')
+    const todayStr = `${year}-${month}-${day}`
+    
+    const filteredEvents = events.filter(event => {
+      if (!event.date) return false
+      const eventDate = event.date.split('T')[0]
+      if (eventDate !== todayStr) return false
+      
+      if (!CALENDAR_COUNTRY_FILTER.includes(event.country)) return false
+      
+      const impactValue = event.impact === 'High' || event.importance === 3
+      if (!impactValue) return false
+      
+      return true
+    })
+    
+    filteredEvents.sort((a, b) => {
+      const timeA = new Date(a.date).getTime()
+      const timeB = new Date(b.date).getTime()
+      return timeA - timeB
+    })
+    
+    const limitedEvents = filteredEvents.slice(0, 5)
+    
+    pushLog(`📅 Found ${limitedEvents.length} USD high-impact events today`)
+    
+    cachedEconomicEvents = limitedEvents
+    lastEconomicFetch = now
+    
+    return limitedEvents
+    
+  } catch (e) {
+    pushLog(`❌ Economic calendar error: ${e.message}`)
+    return null
+  }
+}
+
+function formatEconomicCalendar(events) {
+  if (!events || events.length === 0) {
+    return ''
+  }
+  
+  let calendarText = '\n\n📅 *Kalender Ekonomi USD Hari Ini*\n'
+  calendarText += '━━━━━━━━━━━━━━━━━━━━\n'
+  
+  events.forEach((event, index) => {
+    const eventDate = new Date(event.date)
+    const wibTime = new Date(eventDate.getTime() + (7 * 60 * 60 * 1000))
+    const timeStr = wibTime.toTimeString().substring(0, 5)
+    
+    const title = event.title || event.event || 'Unknown Event'
+    const forecast = event.forecast || '-'
+    const previous = event.previous || '-'
+    
+    calendarText += `${index + 1}. 🕐 ${timeStr} WIB\n`
+    calendarText += `   📊 ${title}\n`
+    
+    if (forecast !== '-' || previous !== '-') {
+      calendarText += `   📈 Forecast: ${forecast} | Prev: ${previous}\n`
+    }
+    
+    calendarText += '\n'
+  })
+  
+  calendarText += '━━━━━━━━━━━━━━━━━━━━\n'
+  calendarText += '⚠️ High Impact Events Only'
+  
+  return calendarText
+}
+
+// ------ FOREX FUNCTIONS ------
 async function fetchUSDIDRFallback() {
   try {
     const res = await fetch('https://api.exchangerate-api.com/v4/latest/USD', {
@@ -241,9 +351,6 @@ async function fetchXAUUSDFromInvesting() {
     const html = await res.text()
     const foundPrices = []
     
-    // ==========================================
-    // METHOD 1: data-test attribute (PALING RELIABLE)
-    // ==========================================
     let match = html.match(/data-test="instrument-price-last"[^>]*>([0-9,]+\.?[0-9]*)</i)
     if (match?.[1]) {
       const price = parseFloat(match[1].replace(/,/g, ''))
@@ -253,168 +360,14 @@ async function fetchXAUUSDFromInvesting() {
       }
     }
     
-    // ==========================================
-    // METHOD 2: instrument-price-last class
-    // ==========================================
     match = html.match(/class="instrument-price-last[^"]*"[^>]*>([0-9,]+\.?[0-9]*)</i)
     if (match?.[1]) {
       const price = parseFloat(match[1].replace(/,/g, ''))
       if (price > 1000 && price < 10000) {
         foundPrices.push({ method: 'class-instrument', price, priority: 2 })
-        console.log(`🔍 Method 2 (class-instrument): $${price.toFixed(2)}`)
       }
     }
     
-    // ==========================================
-    // METHOD 3: JSON-LD structured data
-    // ==========================================
-    const jsonLdMatches = html.matchAll(/<script type="application\/ld\+json"[^>]*>(.*?)<\/script>/gis)
-    for (const jsonMatch of jsonLdMatches) {
-      try {
-        const jsonData = JSON.parse(jsonMatch[1])
-        
-        // Check direct price field
-        if (jsonData.price) {
-          const price = parseFloat(jsonData.price)
-          if (price > 1000 && price < 10000) {
-            foundPrices.push({ method: 'json-ld-direct', price, priority: 3 })
-            console.log(`🔍 Method 3a (json-ld-direct): $${price.toFixed(2)}`)
-          }
-        }
-        
-        // Check @graph array
-        if (jsonData['@graph']) {
-          for (const item of jsonData['@graph']) {
-            if (item.price) {
-              const price = parseFloat(item.price)
-              if (price > 1000 && price < 10000) {
-                foundPrices.push({ method: 'json-ld-graph', price, priority: 3 })
-                console.log(`🔍 Method 3b (json-ld-graph): $${price.toFixed(2)}`)
-              }
-            }
-          }
-        }
-        
-        // Check offers.price
-        if (jsonData.offers?.price) {
-          const price = parseFloat(jsonData.offers.price)
-          if (price > 1000 && price < 10000) {
-            foundPrices.push({ method: 'json-ld-offers', price, priority: 3 })
-            console.log(`🔍 Method 3c (json-ld-offers): $${price.toFixed(2)}`)
-          }
-        }
-      } catch (e) {
-        // Skip invalid JSON
-      }
-    }
-    
-    // ==========================================
-    // METHOD 4: JavaScript window object variables
-    // ==========================================
-    // Pattern: "last":12345.67 or 'last':12345.67
-    match = html.match(/["']last["']\s*:\s*([0-9]+\.?[0-9]*)/i)
-    if (match?.[1]) {
-      const price = parseFloat(match[1])
-      if (price > 1000 && price < 10000) {
-        foundPrices.push({ method: 'js-last', price, priority: 4 })
-        console.log(`🔍 Method 4a (js-last): $${price.toFixed(2)}`)
-      }
-    }
-    
-    // Pattern: priceLast or price_last
-    match = html.match(/price[_-]?last["']?\s*:\s*["']?([0-9,]+\.?[0-9]*)/i)
-    if (match?.[1]) {
-      const price = parseFloat(match[1].replace(/,/g, ''))
-      if (price > 1000 && price < 10000) {
-        foundPrices.push({ method: 'js-price-last', price, priority: 4 })
-        console.log(`🔍 Method 4b (js-price-last): $${price.toFixed(2)}`)
-      }
-    }
-    
-    // Pattern: lastPrice or last_price
-    match = html.match(/last[_-]?price["']?\s*:\s*["']?([0-9,]+\.?[0-9]*)/i)
-    if (match?.[1]) {
-      const price = parseFloat(match[1].replace(/,/g, ''))
-      if (price > 1000 && price < 10000) {
-        foundPrices.push({ method: 'js-last-price', price, priority: 4 })
-        console.log(`🔍 Method 4c (js-last-price): $${price.toFixed(2)}`)
-      }
-    }
-    
-    // ==========================================
-    // METHOD 5: Meta tags
-    // ==========================================
-    // og:price:amount
-    match = html.match(/<meta[^>]*property=["']og:price:amount["'][^>]*content=["']([0-9,]+\.?[0-9]*)["']/i)
-    if (match?.[1]) {
-      const price = parseFloat(match[1].replace(/,/g, ''))
-      if (price > 1000 && price < 10000) {
-        foundPrices.push({ method: 'meta-og-price', price, priority: 5 })
-        console.log(`🔍 Method 5a (meta-og-price): $${price.toFixed(2)}`)
-      }
-    }
-    
-    // twitter:data1
-    match = html.match(/<meta[^>]*name=["']twitter:data1["'][^>]*content=["']([0-9,]+\.?[0-9]*)["']/i)
-    if (match?.[1]) {
-      const price = parseFloat(match[1].replace(/,/g, ''))
-      if (price > 1000 && price < 10000) {
-        foundPrices.push({ method: 'meta-twitter', price, priority: 5 })
-        console.log(`🔍 Method 5b (meta-twitter): $${price.toFixed(2)}`)
-      }
-    }
-    
-    // ==========================================
-    // METHOD 6: data-value attribute
-    // ==========================================
-    match = html.match(/data-value=["']([0-9,]+\.?[0-9]*)["']/i)
-    if (match?.[1]) {
-      const price = parseFloat(match[1].replace(/,/g, ''))
-      if (price > 1000 && price < 10000) {
-        foundPrices.push({ method: 'data-value', price, priority: 6 })
-        console.log(`🔍 Method 6 (data-value): $${price.toFixed(2)}`)
-      }
-    }
-    
-    // ==========================================
-    // METHOD 7: Span with specific classes
-    // ==========================================
-    // last-price-value class
-    match = html.match(/<span[^>]*class=["'][^"']*last-price-value[^"']*["'][^>]*>([0-9,]+\.?[0-9]*)<\/span>/i)
-    if (match?.[1]) {
-      const price = parseFloat(match[1].replace(/,/g, ''))
-      if (price > 1000 && price < 10000) {
-        foundPrices.push({ method: 'span-last-price', price, priority: 7 })
-        console.log(`🔍 Method 7a (span-last-price): $${price.toFixed(2)}`)
-      }
-    }
-    
-    // price-last class
-    match = html.match(/<span[^>]*class=["'][^"']*price-last[^"']*["'][^>]*>([0-9,]+\.?[0-9]*)<\/span>/i)
-    if (match?.[1]) {
-      const price = parseFloat(match[1].replace(/,/g, ''))
-      if (price > 1000 && price < 10000) {
-        foundPrices.push({ method: 'span-price-last', price, priority: 7 })
-        console.log(`🔍 Method 7b (span-price-last): $${price.toFixed(2)}`)
-      }
-    }
-    
-    // ==========================================
-    // METHOD 8: Bid/Ask patterns
-    // ==========================================
-    match = html.match(/(?:bid|ask)[^0-9]*([0-9,]+\.[0-9]{2})/i)
-    if (match?.[1]) {
-      const price = parseFloat(match[1].replace(/,/g, ''))
-      if (price > 1000 && price < 10000) {
-        foundPrices.push({ method: 'bid-ask', price, priority: 8 })
-        console.log(`🔍 Method 8 (bid-ask): $${price.toFixed(2)}`)
-      }
-    }
-    
-    // ==========================================
-    // METHOD 9: Generic number pattern (LAST RESORT)
-    // ==========================================
-    // Look for price-like numbers in specific contexts
     const pricePatterns = [
       /instrument[^>]{0,50}([0-9]{1},?[0-9]{3}\.[0-9]{2})/i,
       /quote[^>]{0,50}([0-9]{1},?[0-9]{3}\.[0-9]{2})/i,
@@ -432,24 +385,18 @@ async function fetchXAUUSDFromInvesting() {
       }
     }
     
-    // ==========================================
-    // PRICE SELECTION LOGIC
-    // ==========================================
-    
     if (foundPrices.length === 0) {
-      console.log('⚠️  Investing.com: No valid prices found with any method')
+      console.log('⚠️  Investing.com: No valid prices found')
       return null
     }
     
     console.log(`📊 Found ${foundPrices.length} potential prices`)
     
-    // Strategy 1: Jika hanya 1 harga ditemukan, langsung return
     if (foundPrices.length === 1) {
-      console.log(`✅ XAU/USD from Investing.com: $${foundPrices[0].price.toFixed(2)} (method: ${foundPrices[0].method})`)
+      console.log(`✅ XAU/USD from Investing.com: $${foundPrices[0].price.toFixed(2)}`)
       return foundPrices[0].price
     }
     
-    // Strategy 2: Group prices by similarity (within $1)
     const priceGroups = new Map()
     
     for (const { method, price, priority } of foundPrices) {
@@ -470,7 +417,6 @@ async function fetchXAUUSDFromInvesting() {
     
     console.log(`📊 Grouped into ${priceGroups.size} price clusters`)
     
-    // Strategy 3: Pilih grup dengan jumlah terbanyak
     let bestGroup = null
     let maxCount = 0
     let bestPriority = 999
@@ -478,21 +424,17 @@ async function fetchXAUUSDFromInvesting() {
     for (const [groupPrice, items] of priceGroups) {
       const avgPriority = items.reduce((sum, item) => sum + item.priority, 0) / items.length
       
-      // Prioritaskan grup dengan count terbanyak
       if (items.length > maxCount) {
         maxCount = items.length
         bestGroup = items
         bestPriority = avgPriority
-      } 
-      // Jika count sama, pilih yang prioritas lebih tinggi (angka lebih kecil)
-      else if (items.length === maxCount && avgPriority < bestPriority) {
+      } else if (items.length === maxCount && avgPriority < bestPriority) {
         bestGroup = items
         bestPriority = avgPriority
       }
     }
     
     if (bestGroup) {
-      // Hitung average dari grup terbaik
       const avgPrice = bestGroup.reduce((sum, item) => sum + item.price, 0) / bestGroup.length
       const methods = bestGroup.map(item => item.method).join(', ')
       
@@ -500,11 +442,10 @@ async function fetchXAUUSDFromInvesting() {
       return avgPrice
     }
     
-    // Strategy 4: Fallback - pilih yang prioritas tertinggi
     foundPrices.sort((a, b) => a.priority - b.priority)
     const fallbackPrice = foundPrices[0].price
     
-    console.log(`✅ XAU/USD from Investing.com: $${fallbackPrice.toFixed(2)} (fallback method: ${foundPrices[0].method})`)
+    console.log(`✅ XAU/USD from Investing.com: $${fallbackPrice.toFixed(2)} (fallback)`)
     return fallbackPrice
     
   } catch (e) {
@@ -553,16 +494,13 @@ async function fetchXAUUSD() {
   return null
 }
 
-// Cache version untuk mengurangi CPU usage
 async function fetchXAUUSDCached() {
   const now = Date.now()
   
-  // Gunakan cache jika masih fresh
   if (cachedXAUUSD && (now - lastXAUUSDFetch) < XAU_CACHE_DURATION) {
     return cachedXAUUSD
   }
   
-  // Fetch baru
   const price = await fetchXAUUSD()
   if (price) {
     cachedXAUUSD = price
@@ -587,20 +525,15 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
   let emoji = '✅'
   let message = ''
   
-  // Selisih sangat kecil = NORMAL
   if (Math.abs(difference) <= NORMAL_LOW_THRESHOLD) {
     status = 'NORMAL'
     emoji = '✅'
     message = `NORMAL`
-  } 
-  // Selisih sedang = NORMAL
-  else if (Math.abs(difference) <= NORMAL_THRESHOLD) {
+  } else if (Math.abs(difference) <= NORMAL_THRESHOLD) {
     status = 'NORMAL'
     emoji = '✅'
     message = `NORMAL`
-  } 
-  // Selisih besar = ABNORMAL
-  else {
+  } else {
     status = 'ABNORMAL'
     emoji = '❌'
     const selisihText = difference > 0 
@@ -618,7 +551,7 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
   }
 }
 
-function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange = null) {
+function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange = null, economicEvents = null) {
   const buy = treasuryData?.data?.buying_rate || 0
   const sell = treasuryData?.data?.selling_rate || 0
   
@@ -663,6 +596,18 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
     marketSection += `💰 XAU/USD: $${xauUsdPrice.toFixed(2)}/oz`
   }
   
+  const calendarSection = formatEconomicCalendar(economicEvents)
+  
+  const grams20M = calculateProfit(buy, sell, 20000000).totalGrams
+  const profit20M = calculateProfit(buy, sell, 20000000).profit
+  const grams30M = calculateProfit(buy, sell, 30000000).totalGrams
+  const profit30M = calculateProfit(buy, sell, 30000000).profit
+  
+  const formatGrams = (g) => {
+    const formatted = g.toFixed(4)
+    return formatted.replace(/\.?0+$/, '')
+  }
+  
   return `${headerSection}${timeSection}${statusSection}
 📊 Harga Beli: ${buyFormatted}
 📉 Harga Jual: ${sellFormatted}
@@ -671,9 +616,9 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
 ${marketSection}
 
 🎁 Promo
-💰 Rp20 Juta ➜ ${calculateProfit(buy, sell, 20000000).totalGrams.toFixed(2)} gr | Profit: +Rp${formatRupiah(Math.round(calculateProfit(buy, sell, 20000000).profit))} 🚀
-💰 Rp30 Juta ➜ ${calculateProfit(buy, sell, 30000000).totalGrams.toFixed(2)} gr | Profit: +Rp${formatRupiah(Math.round(calculateProfit(buy, sell, 30000000).profit))} 🚀
-
+💰 Rp20 Juta ➜ ${formatGrams(grams20M)} gr | Profit: +Rp${formatRupiah(Math.round(profit20M))} 🚀
+💰 Rp30 Juta ➜ ${formatGrams(grams30M)} gr | Profit: +Rp${formatRupiah(Math.round(profit30M))} 🚀
+${calendarSection}
 ⚡ Harga diperbarui otomatis`
 }
 
@@ -691,6 +636,7 @@ async function fetchTreasury() {
   return json
 }
 
+// ⚡ ZERO DELAY BROADCAST FUNCTION
 async function doBroadcast(priceChange) {
   if (isBroadcasting) {
     return
@@ -706,10 +652,12 @@ async function doBroadcast(priceChange) {
   }
 
   try {
-    const [treasury, usdIdr, xauUsd] = await Promise.all([
+    // Fetch semua data PARALLEL
+    const [treasury, usdIdr, xauUsd, economicEvents] = await Promise.all([
       fetchTreasury(),
       fetchUSDIDRFromGoogle(),
-      fetchXAUUSDCached()
+      fetchXAUUSDCached(),
+      fetchEconomicCalendar()
     ])
     
     lastBroadcastedPrice = {
@@ -717,21 +665,36 @@ async function doBroadcast(priceChange) {
       sell: treasury?.data?.selling_rate
     }
     
-    const message = formatMessage(treasury, usdIdr.rate, xauUsd, priceChange)
+    const message = formatMessage(treasury, usdIdr.rate, xauUsd, priceChange, economicEvents)
     
     pushLog(`📤 [#${currentBroadcastId}] Broadcasting to ${subscriptions.size} subs`)
     
     let successCount = 0
     let failCount = 0
     
-    for (const chatId of subscriptions) {
-      try {
-        await sock.sendMessage(chatId, { text: message })
-        successCount++
-        await new Promise(r => setTimeout(r, 500))
-      } catch (e) {
-        failCount++
-        pushLog(`❌ Failed: ${chatId.substring(0, 15)}`)
+    const subsArray = Array.from(subscriptions)
+    
+    // Batch sending untuk avoid rate limit
+    for (let i = 0; i < subsArray.length; i += BATCH_SIZE) {
+      const batch = subsArray.slice(i, i + BATCH_SIZE)
+      
+      // Send batch PARALLEL - NO DELAY!
+      const sendPromises = batch.map(chatId => 
+        sock.sendMessage(chatId, { text: message })
+          .then(() => {
+            successCount++
+          })
+          .catch((e) => {
+            failCount++
+            pushLog(`❌ Failed: ${chatId.substring(0, 15)}`)
+          })
+      )
+      
+      await Promise.allSettled(sendPromises)
+      
+      // Delay hanya antar batch (jika ada batch berikutnya)
+      if (i + BATCH_SIZE < subsArray.length) {
+        await new Promise(r => setTimeout(r, BATCH_DELAY))
       }
     }
     
@@ -813,7 +776,9 @@ async function checkPriceUpdate() {
       buyChange: currentPrice.buy - lastBroadcastedPrice.buy,
       sellChange: currentPrice.sell - lastBroadcastedPrice.sell
     }
-    await doBroadcast(finalPriceChange)
+    
+    // INSTANT BROADCAST - Fire and forget (no await)
+    doBroadcast(finalPriceChange)
     
   } catch (e) {
     // Silent fail
@@ -826,6 +791,9 @@ console.log(`✅ One broadcast per minute - Send immediately on first change`)
 console.log(`📊 Price check: every ${PRICE_CHECK_INTERVAL/1000}s`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`🔧 XAU/USD cache: ${XAU_CACHE_DURATION/1000}s`)
+console.log(`📅 Economic calendar: USD High-Impact only`)
+console.log(`⚡ Batch size: ${BATCH_SIZE} messages`)
+console.log(`⚡ Batch delay: ${BATCH_DELAY}ms`)
 console.log(`🌍 XAU/USD: TradingView → Investing → Google\n`)
 
 const app = express()
@@ -868,15 +836,34 @@ app.get('/stats', (_req, res) => {
     broadcastCount: broadcastCount,
     lastBroadcastMinute: lastBroadcastMinute,
     cachedXAUUSD: cachedXAUUSD,
+    cachedEconomicEvents: cachedEconomicEvents,
     wsConnected: sock?.ws?.readyState === 1,
     logs: logs.slice(-20)
   })
 })
 
+app.get('/calendar', async (_req, res) => {
+  try {
+    const events = await fetchEconomicCalendar()
+    res.json({
+      success: true,
+      count: events?.length || 0,
+      events: events || [],
+      formatted: formatEconomicCalendar(events)
+    })
+  } catch (e) {
+    res.status(500).json({
+      success: false,
+      error: e.message
+    })
+  }
+})
+
 app.listen(PORT, () => {
   console.log(`🌐 Server: http://localhost:${PORT}`)
   console.log(`📊 Stats: http://localhost:${PORT}/stats`)
-  console.log(`💊 Health: http://localhost:${PORT}/health\n`)
+  console.log(`💊 Health: http://localhost:${PORT}/health`)
+  console.log(`📅 Calendar: http://localhost:${PORT}/calendar\n`)
 })
 
 // KEEP-ALIVE SYSTEM
@@ -887,7 +874,6 @@ const SELF_URL = process.env.RENDER_EXTERNAL_URL ||
 console.log(`🏓 Keep-alive target: ${SELF_URL}`)
 console.log(`🏓 Keep-alive interval: 60 seconds\n`)
 
-// Ping setiap 1 menit
 setInterval(async () => {
   try {
     const response = await fetch(`${SELF_URL}/health`, {
@@ -905,7 +891,6 @@ setInterval(async () => {
   }
 }, 60 * 1000)
 
-// Initial ping setelah 30 detik
 setTimeout(async () => {
   try {
     const response = await fetch(`${SELF_URL}/health`, {
@@ -981,6 +966,12 @@ async function start() {
         isReady = true
         pushLog('🚀 Bot ready!')
         checkPriceUpdate()
+        
+        fetchEconomicCalendar().then(events => {
+          if (events && events.length > 0) {
+            pushLog(`📅 Loaded ${events.length} economic events`)
+          }
+        })
       }, 15000)
     }
   })
@@ -1006,14 +997,14 @@ async function start() {
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Max 1x broadcast per menit'
+              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Max 1x broadcast per menit\n📅 Termasuk kalender ekonomi USD'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`➕ New sub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Kirim langsung di perubahan pertama setiap menit\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Kirim langsung di perubahan pertama setiap menit\n📅 Termasuk kalender ekonomi USD high-impact\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
@@ -1046,12 +1037,13 @@ async function start() {
 
         let replyText
         try {
-          const [treasury, usdIdr, xauUsd] = await Promise.all([
+          const [treasury, usdIdr, xauUsd, economicEvents] = await Promise.all([
             fetchTreasury(),
             fetchUSDIDRFromGoogle(),
-            fetchXAUUSDCached()
+            fetchXAUUSDCached(),
+            fetchEconomicCalendar()
           ])
-          replyText = formatMessage(treasury, usdIdr.rate, xauUsd, null)
+          replyText = formatMessage(treasury, usdIdr.rate, xauUsd, null, economicEvents)
         } catch (e) {
           replyText = '❌ Gagal mengambil data harga.'
         }
