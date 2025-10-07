@@ -17,14 +17,17 @@ const TREASURY_URL = process.env.TREASURY_URL ||
 // Anti-spam settings
 const COOLDOWN_PER_CHAT = 60000
 const GLOBAL_THROTTLE = 3000
-const TYPING_DURATION = 2000 // 2 detik
+const TYPING_DURATION = 2000
 const RANDOM_DELAY_MIN = 500
 const RANDOM_DELAY_MAX = 1000
 
-// REAL-TIME: Cek setiap 2 detik
-const PRICE_CHECK_INTERVAL = 2000
+// REAL-TIME dengan DEBOUNCE
+const PRICE_CHECK_INTERVAL = 2000 // Cek setiap 2 detik
+const DEBOUNCE_TIME = 3000 // Tunggu 3 detik sebelum broadcast (cegah double)
 let lastKnownPrice = null
 let isBroadcasting = false
+let pendingBroadcast = null // Timer untuk debounce
+let latestPriceChange = null // Simpan perubahan terbaru
 
 // Reconnect settings
 let reconnectAttempts = 0
@@ -259,8 +262,8 @@ async function fetchTreasury() {
   return json
 }
 
-// ------ INSTANT BROADCAST ------
-async function broadcastToSubscribers(priceChange) {
+// ------ DEBOUNCED BROADCAST ------
+async function doBroadcast(priceChange) {
   if (isBroadcasting) return
   isBroadcasting = true
 
@@ -299,7 +302,26 @@ async function broadcastToSubscribers(priceChange) {
   isBroadcasting = false
 }
 
-// ------ REAL-TIME PRICE MONITOR (2 detik) ------
+// Fungsi untuk schedule broadcast dengan debounce
+function scheduleBroadcast(priceChange) {
+  // Cancel pending broadcast jika ada
+  if (pendingBroadcast) {
+    clearTimeout(pendingBroadcast)
+    console.log(`⏸️  Debouncing... (waiting for stable price)`)
+  }
+  
+  // Simpan perubahan harga terbaru
+  latestPriceChange = priceChange
+  
+  // Schedule broadcast baru
+  pendingBroadcast = setTimeout(async () => {
+    await doBroadcast(latestPriceChange)
+    pendingBroadcast = null
+    latestPriceChange = null
+  }, DEBOUNCE_TIME)
+}
+
+// ------ REAL-TIME PRICE MONITOR ------
 async function checkPriceUpdate() {
   if (!isReady || subscriptions.size === 0) return
 
@@ -319,7 +341,7 @@ async function checkPriceUpdate() {
       lastKnownPrice.sell !== currentPrice.sell ||
       lastKnownPrice.updated_at !== currentPrice.updated_at
     ) {
-      // HARGA BERUBAH - LANGSUNG BROADCAST!
+      // HARGA BERUBAH!
       const priceChange = {
         buyChange: currentPrice.buy - lastKnownPrice.buy,
         sellChange: currentPrice.sell - lastKnownPrice.sell
@@ -331,21 +353,22 @@ async function checkPriceUpdate() {
       
       console.log(`\n🔔 ${time} PRICE CHANGED!`)
       console.log(`${buyIcon} Buy: ${formatRupiah(lastKnownPrice.buy)} → ${formatRupiah(currentPrice.buy)} (${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)})`)
-      console.log(`${sellIcon} Sell: ${formatRupiah(lastKnownPrice.sell)} → ${formatRupiah(currentPrice.sell)} (${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)})\n`)
+      console.log(`${sellIcon} Sell: ${formatRupiah(lastKnownPrice.sell)} → ${formatRupiah(currentPrice.sell)} (${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)})`)
       
       lastKnownPrice = currentPrice
       
-      // LANGSUNG BROADCAST!
-      await broadcastToSubscribers(priceChange)
+      // Schedule broadcast dengan debounce (tunggu 3 detik)
+      scheduleBroadcast(priceChange)
     }
   } catch (e) {
-    // Silent fail, retry di interval berikutnya
+    // Silent fail
   }
 }
 
 // Start monitoring setiap 2 detik
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
-console.log(`✅ Real-time monitoring: every ${PRICE_CHECK_INTERVAL/1000}s\n`)
+console.log(`✅ Real-time monitoring: every ${PRICE_CHECK_INTERVAL/1000}s`)
+console.log(`⏱️  Debounce time: ${DEBOUNCE_TIME/1000}s (prevent double broadcast)\n`)
 
 // ------ EXPRESS ------
 const app = express()
@@ -372,13 +395,15 @@ app.get('/stats', (_req, res) => {
     subs: subscriptions.size,
     lastPrice: lastKnownPrice,
     interval: `${PRICE_CHECK_INTERVAL/1000}s`,
+    debounce: `${DEBOUNCE_TIME/1000}s`,
+    pendingBroadcast: !!pendingBroadcast,
     logs: logs.slice(-15)
   })
 })
 
 app.listen(PORT, () => {
   console.log(`🌐 http://localhost:${PORT}`)
-  console.log(`📊 /stats | 🔴 /broadcast-now | 🔍 /check-price\n`)
+  console.log(`📊 /stats\n`)
 })
 
 // ------ WHATSAPP ------
@@ -468,14 +493,14 @@ async function start() {
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update real-time saat harga berubah (cek setiap 2 detik).\n\n_Ketik "berhenti" untuk stop._'
+              text: '✅ Sudah berlangganan!\n\n📢 Update real-time (cek setiap 2s, kirim setelah harga stabil 3s).\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`+ ${sendTarget.substring(0, 15)}`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 *Langganan Berhasil!*\n\n📢 Anda akan dapat update INSTANT saat harga berubah!\n\n_Bot cek harga setiap 2 detik untuk update real-time._\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 *Langganan Berhasil!*\n\n📢 Update INSTANT saat harga berubah!\n\n_Bot cek setiap 2 detik, broadcast setelah harga stabil 3 detik (cegah double)._\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
@@ -486,14 +511,9 @@ async function start() {
           if (subscriptions.has(sendTarget)) {
             subscriptions.delete(sendTarget)
             pushLog(`- ${sendTarget.substring(0, 15)}`)
-            
-            await sock.sendMessage(sendTarget, {
-              text: '👋 Langganan dihentikan.'
-            }, { quoted: msg })
+            await sock.sendMessage(sendTarget, { text: '👋 Langganan dihentikan.' }, { quoted: msg })
           } else {
-            await sock.sendMessage(sendTarget, {
-              text: '❌ Belum berlangganan.'
-            }, { quoted: msg })
+            await sock.sendMessage(sendTarget, { text: '❌ Belum berlangganan.' }, { quoted: msg })
           }
           continue
         }
