@@ -411,24 +411,29 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
   const difference = treasurySell - internationalPricePerGram
   
   let status = 'NORMAL'
-  let emoji = '⚠️'
+  let emoji = '✅'
   let message = ''
   
+  // Selisih sangat kecil = NORMAL
   if (Math.abs(difference) <= NORMAL_LOW_THRESHOLD) {
     status = 'NORMAL'
-    emoji = '⚠️'
-    message = `ABNORMAL ⚠️`
-  } else if (Math.abs(difference) <= NORMAL_THRESHOLD) {
+    emoji = '✅'
+    message = `NORMAL ✅\nHarga Treasury mendekati harga internasional`
+  } 
+  // Selisih sedang = NORMAL tapi perlu perhatian
+  else if (Math.abs(difference) <= NORMAL_THRESHOLD) {
     status = 'NORMAL'
     emoji = '⚠️'
-    message = `ABNORMAL ⚠️`
-  } else {
+    message = `NORMAL ⚠️\nSelisih dalam batas wajar`
+  } 
+  // Selisih besar = ABNORMAL
+  else {
     status = 'ABNORMAL'
-    emoji = '⚠️'
+    emoji = '❌'
     const selisihText = difference > 0 
-      ? `+${formatRupiah(Math.round(Math.abs(difference)))}` 
-      : `-${formatRupiah(Math.round(Math.abs(difference)))}`
-    message = `ABNORMAL ⚠️\nSELISIH HARGA JUAL - HARGA JUAL TREASURY = ${selisihText}`
+      ? `+Rp${formatRupiah(Math.round(Math.abs(difference)))}` 
+      : `-Rp${formatRupiah(Math.round(Math.abs(difference)))}`
+    message = `ABNORMAL ❌\nSELISIH BESAR: ${selisihText}`
   }
   
   return {
