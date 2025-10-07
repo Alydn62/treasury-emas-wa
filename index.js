@@ -19,10 +19,10 @@ const COOLDOWN_PER_CHAT = 60000
 const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
 
-// INSTANT BROADCAST dengan SMART FILTERING
+// SCHEDULED BROADCAST - Kirim setiap 1 menit
 const PRICE_CHECK_INTERVAL = 1000    // Cek setiap 1 detik
-const MIN_PRICE_CHANGE = 0          // Skip perubahan < Rp50
-const MIN_BROADCAST_INTERVAL = 60000 // Minimal 1 MENIT antar broadcast (anti-spam)
+const BROADCAST_SCHEDULE = 60000     // Broadcast TEPAT setiap 1 menit
+const MIN_PRICE_CHANGE = 1          // Skip perubahan < Rp50
 
 // Konversi troy ounce ke gram
 const TROY_OZ_TO_GRAM = 31.1034768
@@ -36,6 +36,7 @@ let lastBroadcastedPrice = null
 let lastBroadcastTime = 0
 let isBroadcasting = false
 let broadcastCount = 0
+let priceChangePending = false
 
 // Reconnect settings
 let reconnectAttempts = 0
@@ -239,7 +240,6 @@ async function fetchXAUUSDFromInvesting() {
     let price = null
     const parsedPrices = []
     
-    // METHOD 1: data-test attribute (most reliable)
     let match = html.match(/data-test="instrument-price-last"[^>]*>([0-9,]+\.?[0-9]*)</i)
     if (match?.[1]) {
       const p = parseFloat(match[1].replace(/,/g, ''))
@@ -248,7 +248,6 @@ async function fetchXAUUSDFromInvesting() {
       }
     }
     
-    // METHOD 2: Specific price pattern with span
     match = html.match(/<span[^>]*class="[^"]*last-price-value[^"]*"[^>]*>([0-9,]+\.?[0-9]*)<\/span>/i)
     if (match?.[1]) {
       const p = parseFloat(match[1].replace(/,/g, ''))
@@ -257,7 +256,6 @@ async function fetchXAUUSDFromInvesting() {
       }
     }
     
-    // METHOD 3: JSON-LD structured data
     match = html.match(/<script type="application\/ld\+json"[^>]*>([^<]+)<\/script>/i)
     if (match?.[1]) {
       try {
@@ -271,7 +269,6 @@ async function fetchXAUUSDFromInvesting() {
       } catch (_) {}
     }
     
-    // METHOD 4: Price in quotes pattern
     match = html.match(/"price[Ll]ast":\s*"?([0-9,]+\.?[0-9]*)"?/i)
     if (match?.[1]) {
       const p = parseFloat(match[1].replace(/,/g, ''))
@@ -280,7 +277,6 @@ async function fetchXAUUSDFromInvesting() {
       }
     }
     
-    // METHOD 5: Alternative data attribute
     match = html.match(/data-value="([0-9,]+\.?[0-9]*)"/i)
     if (match?.[1]) {
       const p = parseFloat(match[1].replace(/,/g, ''))
@@ -289,7 +285,6 @@ async function fetchXAUUSDFromInvesting() {
       }
     }
     
-    // METHOD 6: Bid/Ask price as fallback
     match = html.match(/(?:bid|ask)[^\d]*([0-9,]+\.[0-9]{2})/i)
     if (match?.[1]) {
       const p = parseFloat(match[1].replace(/,/g, ''))
@@ -298,7 +293,6 @@ async function fetchXAUUSDFromInvesting() {
       }
     }
     
-    // METHOD 7: Generic price span pattern
     match = html.match(/<span[^>]*>([0-9]{1},?[0-9]{3}\.[0-9]{2})<\/span>/i)
     if (match?.[1]) {
       const p = parseFloat(match[1].replace(/,/g, ''))
@@ -307,7 +301,6 @@ async function fetchXAUUSDFromInvesting() {
       }
     }
     
-    // METHOD 8: Look for price in meta tags
     match = html.match(/<meta[^>]*property="og:price:amount"[^>]*content="([0-9,]+\.?[0-9]*)"/i)
     if (match?.[1]) {
       const p = parseFloat(match[1].replace(/,/g, ''))
@@ -321,7 +314,6 @@ async function fetchXAUUSDFromInvesting() {
       return null
     }
     
-    // CONSENSUS ALGORITHM
     if (parsedPrices.length === 1) {
       price = parsedPrices[0].price
       console.log(`✅ XAU/USD from Investing.com: $${price.toFixed(2)} (method: ${parsedPrices[0].method})`)
@@ -525,16 +517,6 @@ async function fetchTreasury() {
 
 async function doBroadcast(priceChange) {
   if (isBroadcasting) {
-    pushLog('⏭️  Broadcast already in progress, skipping')
-    return
-  }
-
-  const now = Date.now()
-  const timeSinceLastBroadcast = now - lastBroadcastTime
-  
-  if (timeSinceLastBroadcast < MIN_BROADCAST_INTERVAL) {
-    const remaining = Math.ceil((MIN_BROADCAST_INTERVAL - timeSinceLastBroadcast) / 1000)
-    pushLog(`⏭️  Too soon, wait ${remaining}s (min 1 minute between broadcasts)`)
     return
   }
 
@@ -580,6 +562,8 @@ async function doBroadcast(priceChange) {
     lastBroadcastTime = Date.now()
     pushLog(`✅ [#${currentBroadcastId}] Sent: ${successCount}, Failed: ${failCount}`)
     
+    priceChangePending = false
+    
   } catch (e) {
     pushLog(`❌ Broadcast error: ${e.message}`)
   }
@@ -621,8 +605,6 @@ async function checkPriceUpdate() {
     
     if (buyChangeSinceBroadcast < MIN_PRICE_CHANGE && sellChangeSinceBroadcast < MIN_PRICE_CHANGE) {
       lastKnownPrice = currentPrice
-      const time = new Date().toISOString().substring(11, 19)
-      pushLog(`⏭️  ${time} Change < Rp${MIN_PRICE_CHANGE} - SKIP`)
       return
     }
     
@@ -634,19 +616,29 @@ async function checkPriceUpdate() {
     
     pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
     
-    // INSTANT BROADCAST - No debounce!
-    await doBroadcast(priceChange)
+    // Set flag bahwa ada perubahan harga
+    priceChangePending = true
     
   } catch (e) {
     // Silent fail
   }
 }
 
+// SCHEDULED BROADCAST - Kirim tepat setiap 1 menit jika ada perubahan
+setInterval(async () => {
+  if (priceChangePending && !isBroadcasting) {
+    const priceChange = {
+      buyChange: lastKnownPrice.buy - lastBroadcastedPrice.buy,
+      sellChange: lastKnownPrice.sell - lastBroadcastedPrice.sell
+    }
+    await doBroadcast(priceChange)
+  }
+}, BROADCAST_SCHEDULE) // Tepat setiap 1 menit
+
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
-console.log(`✅ INSTANT Real-time monitoring: every ${PRICE_CHECK_INTERVAL/1000}s`)
-console.log(`⚡ INSTANT BROADCAST with Smart Filtering`)
+console.log(`✅ Scheduled Broadcast: every ${BROADCAST_SCHEDULE/1000}s (1 minute)`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE} (skip smaller changes)`)
-console.log(`⏰ Min broadcast interval: ${MIN_BROADCAST_INTERVAL/1000}s = 1 minute (STRICT anti-spam)`)
+console.log(`⏰ No "too soon" messages - broadcasts on schedule only`)
 console.log(`🌍 XAU/USD: TradingView → Investing → Google\n`)
 
 const app = express()
@@ -683,7 +675,7 @@ app.listen(PORT, () => {
   console.log(`📊 /stats\n`)
 })
 
-// KEEP-ALIVE SYSTEM - AGRESIF (Setiap 2 menit)
+// KEEP-ALIVE SYSTEM
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || 
                  process.env.RAILWAY_STATIC_URL || 
                  `http://localhost:${PORT}`
@@ -699,7 +691,7 @@ setInterval(async () => {
   } catch (e) {
     pushLog(`⚠️  Keep-alive ping failed: ${e.message}`)
   }
-}, 2 * 60 * 1000) // Setiap 2 menit (lebih agresif)
+}, 2 * 60 * 1000)
 
 console.log(`🏓 Keep-alive system enabled (ping every 2 minutes)`)
 
@@ -707,7 +699,7 @@ async function start() {
   const { state, saveCreds } = await useMultiFileAuthState('./auth')
   const { version } = await fetchLatestBaileysVersion()
 
-sock = makeWASocket({
+  sock = makeWASocket({
     version,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
@@ -730,7 +722,7 @@ sock = makeWASocket({
   sock.ev.on('connection.update', async (u) => {
     const { connection, lastDisconnect, qr } = u
     
-    if (qr) {
+if (qr) {
       lastQr = qr
       pushLog('QR ready')
     }
