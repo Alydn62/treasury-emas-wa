@@ -21,7 +21,7 @@ const TYPING_DURATION = 2000
 
 // REAL-TIME dengan SMART DEBOUNCE
 const PRICE_CHECK_INTERVAL = 1000    // Cek setiap 1 detik
-const DEBOUNCE_TIME = 10000          // Tunggu 10 detik untuk stabilisasi harga
+const DEBOUNCE_TIME = 2500          // Tunggu 10 detik untuk stabilisasi harga
 const MIN_BROADCAST_INTERVAL = 5000  // Minimal 5 detik antar broadcast
 
 // Konversi troy ounce ke gram
