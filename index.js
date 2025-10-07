@@ -15,7 +15,7 @@ const TREASURY_URL = process.env.TREASURY_URL ||
   'https://api.treasury.id/api/v1/antigrvty/gold/rate'
 
 // Anti-spam settings
-const COOLDOWN_PER_CHAT = 60000 // 1 menit
+const COOLDOWN_PER_CHAT = 60000
 const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 6000
 const RANDOM_DELAY_MIN = 2000
@@ -33,14 +33,16 @@ const processedMsgIds = new Set()
 const lastReplyAtPerChat = new Map()
 let lastGlobalReplyAt = 0
 let isReady = false
-let sock = null // Store socket instance
+let sock = null
 
-// Subscription state - Menyimpan daftar chat yang berlangganan
-const subscriptions = new Set() // Format: '628123456789@s.whatsapp.net' atau '12345@g.us'
-let lastBroadcastHour = -1 // Track jam terakhir broadcast
+// Subscription state
+const subscriptions = new Set()
+let lastBroadcastMinute = -1 // Track menit terakhir broadcast
 
 function pushLog(s) {
-  logs.push(`${new Date().toISOString()} ${s}`)
+  const logMsg = `${new Date().toISOString()} ${s}`
+  logs.push(logMsg)
+  console.log(logMsg) // Print ke console juga
   if (logs.length > 100) logs.splice(0, logs.length - 100)
 }
 
@@ -257,43 +259,71 @@ async function fetchTreasury() {
 
 // ------ SUBSCRIPTION BROADCAST ------
 async function broadcastToSubscribers() {
-  if (!sock || !isReady || subscriptions.size === 0) {
+  const now = new Date()
+  const timeStr = `${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+  
+  console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`)
+  console.log(`🔔 BROADCAST TRIGGERED at ${timeStr}`)
+  console.log(`📊 Status: isReady=${isReady}, sock=${!!sock}, subscribers=${subscriptions.size}`)
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`)
+
+  if (!sock) {
+    console.log('❌ Socket not initialized')
+    pushLog('Broadcast skipped: socket not ready')
     return
   }
 
-  console.log(`📢 Broadcasting to ${subscriptions.size} subscribers...`)
+  if (!isReady) {
+    console.log('❌ Bot not ready yet (warmup)')
+    pushLog('Broadcast skipped: bot not ready')
+    return
+  }
+
+  if (subscriptions.size === 0) {
+    console.log('❌ No subscribers')
+    pushLog('Broadcast skipped: no subscribers')
+    return
+  }
+
+  console.log(`📢 Broadcasting to ${subscriptions.size} subscriber(s)...`)
   pushLog(`Broadcasting to ${subscriptions.size} subscribers`)
 
   try {
     // Fetch data
+    console.log('📥 Fetching data...')
     const [treasury, usdIdr] = await Promise.all([
       fetchTreasury(),
       fetchUSDIDRFromGoogle()
     ])
     
     const message = formatMessage(treasury, usdIdr)
+    console.log('✅ Data fetched successfully')
     
-    // Kirim ke semua subscriber dengan delay
+    // Kirim ke semua subscriber
     let successCount = 0
     let failCount = 0
     
     for (const chatId of subscriptions) {
       try {
+        console.log(`📤 Sending to ${chatId}...`)
         await sock.sendMessage(chatId, { text: message })
         successCount++
-        console.log(`✅ Broadcast sent to ${chatId}`)
+        console.log(`✅ Sent to ${chatId}`)
+        pushLog(`Broadcast sent to ${chatId}`)
         
-        // Delay antar pengiriman untuk menghindari spam
+        // Delay antar pengiriman
         await new Promise(r => setTimeout(r, 2000))
       } catch (e) {
         failCount++
         console.log(`❌ Failed to send to ${chatId}: ${e.message}`)
-        pushLog(`Broadcast failed: ${chatId}`)
+        pushLog(`Broadcast failed to ${chatId}: ${e.message}`)
       }
     }
     
+    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`)
     console.log(`📊 Broadcast complete: ${successCount} success, ${failCount} failed`)
-    pushLog(`Broadcast: ${successCount} success, ${failCount} failed`)
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`)
+    pushLog(`Broadcast complete: ${successCount}/${subscriptions.size}`)
     
   } catch (e) {
     console.error('❌ Broadcast error:', e)
@@ -301,20 +331,21 @@ async function broadcastToSubscribers() {
   }
 }
 
-// Cek setiap detik apakah sudah waktunya broadcast
+// ------ BROADCAST SCHEDULER ------
+// Cek setiap detik
 setInterval(() => {
   const now = new Date()
-  const currentHour = now.getHours()
   const currentMinute = now.getMinutes()
   const currentSecond = now.getSeconds()
   
-  // Broadcast setiap jam di detik 01 (XX:00:01)
-  if (currentMinute === 0 && currentSecond === 1 && currentHour !== lastBroadcastHour) {
-    lastBroadcastHour = currentHour
-    console.log(`⏰ Broadcast time: ${currentHour}:00:01`)
+  // Broadcast setiap menit di detik 01
+  if (currentSecond === 1 && currentMinute !== lastBroadcastMinute) {
+    lastBroadcastMinute = currentMinute
     broadcastToSubscribers()
   }
-}, 1000) // Cek setiap 1 detik
+}, 1000)
+
+console.log('✅ Broadcast scheduler started (every minute at :01 seconds)')
 
 // ------ EXPRESS ------
 const app = express()
@@ -360,7 +391,7 @@ app.get('/stats', (_req, res) => {
     })),
     processedMessages: processedMsgIds.size,
     reconnectAttempts,
-    lastBroadcastHour,
+    lastBroadcastMinute,
     activeChats: Array.from(lastReplyAtPerChat.entries())
       .slice(-10)
       .map(([chat, lastTime]) => ({
@@ -369,7 +400,7 @@ app.get('/stats', (_req, res) => {
         lastReply: new Date(lastTime).toISOString(),
         cooldown: Math.max(0, Math.round((COOLDOWN_PER_CHAT - (Date.now() - lastTime)) / 1000)) + 's'
       })),
-    recentLogs: logs.slice(-15)
+    recentLogs: logs.slice(-20)
   }
   res.json(stats)
 })
@@ -387,6 +418,7 @@ app.post('/subscribe', (req, res) => {
     return res.status(400).json({ error: 'chatId required' })
   }
   subscriptions.add(chatId)
+  pushLog(`Manual subscribe: ${chatId}`)
   res.json({ success: true, total: subscriptions.size })
 })
 
@@ -396,7 +428,19 @@ app.post('/unsubscribe', (req, res) => {
     return res.status(400).json({ error: 'chatId required' })
   }
   subscriptions.delete(chatId)
+  pushLog(`Manual unsubscribe: ${chatId}`)
   res.json({ success: true, total: subscriptions.size })
+})
+
+// ENDPOINT BARU: Trigger broadcast manual
+app.get('/broadcast-now', async (_req, res) => {
+  console.log('\n🔴 Manual broadcast triggered via API')
+  await broadcastToSubscribers()
+  res.json({ 
+    success: true, 
+    subscribers: subscriptions.size,
+    message: 'Broadcast triggered'
+  })
 })
 
 app.get('/test', async (_req, res) => {
@@ -414,11 +458,14 @@ app.get('/test', async (_req, res) => {
 })
 
 app.listen(PORT, () => {
+  console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`)
   console.log(`🌐 Server running on port ${PORT}`)
   console.log(`📊 Stats: http://localhost:${PORT}/stats`)
   console.log(`👥 Subscribers: http://localhost:${PORT}/subscribers`)
+  console.log(`🔴 Broadcast Now: http://localhost:${PORT}/broadcast-now`)
   console.log(`🧪 Test: http://localhost:${PORT}/test`)
   console.log(`📱 QR: http://localhost:${PORT}/qr`)
+  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`)
 })
 
 // ------ WHATSAPP ------
@@ -504,7 +551,8 @@ async function start() {
       setTimeout(() => {
         isReady = true
         console.log('🟢 Ready!')
-        pushLog('Ready')
+        console.log(`📊 Subscribers: ${subscriptions.size}`)
+        pushLog('Bot ready')
       }, 20000)
     }
   })
@@ -529,30 +577,30 @@ async function start() {
         const sendTarget = msg.key.remoteJid
         const isGroup = isGroupMessage(msg)
         
-        // Command: langganan atau subscribe
+        // Command: langganan
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Anda sudah berlangganan!\n\n📢 Anda akan menerima update harga emas otomatis setiap jam.\n\n_Ketik "berhenti" untuk berhenti langganan._'
+              text: '✅ Anda sudah berlangganan!\n\n📢 Anda akan menerima update harga emas otomatis setiap menit.\n\n_Ketik "berhenti" untuk berhenti langganan._'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
-            console.log(`➕ New subscriber: ${sendTarget}`)
-            pushLog(`New subscriber: ${isGroup ? 'GROUP' : 'DM'}`)
+            console.log(`➕ New subscriber: ${sendTarget} (${isGroup ? 'GROUP' : 'DM'})`)
+            pushLog(`New subscriber: ${sendTarget}`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 *Langganan Berhasil!*\n\n📢 Anda akan menerima update harga emas otomatis setiap jam di detik ke-01.\n\n_Ketik "berhenti" untuk berhenti langganan._'
+              text: '🎉 *Langganan Berhasil!*\n\n📢 Anda akan menerima update harga emas otomatis setiap menit di detik ke-01.\n\n_Ketik "berhenti" untuk berhenti langganan._'
             }, { quoted: msg })
           }
           continue
         }
         
-        // Command: berhenti atau unsubscribe
+        // Command: berhenti
         if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             subscriptions.delete(sendTarget)
             console.log(`➖ Unsubscribed: ${sendTarget}`)
-            pushLog(`Unsubscribed: ${isGroup ? 'GROUP' : 'DM'}`)
+            pushLog(`Unsubscribed: ${sendTarget}`)
             
             await sock.sendMessage(sendTarget, {
               text: '👋 Langganan dihentikan.\n\n_Ketik "langganan" untuk berlangganan kembali._'
@@ -571,7 +619,6 @@ async function start() {
         const now = Date.now()
         
         console.log(`📨 Message from: ${isGroup ? 'GROUP' : 'DM'} | ${sendTarget}`)
-        pushLog(`Message: ${isGroup ? 'GROUP' : 'DM'}`)
         
         const lastReply = lastReplyAtPerChat.get(sendTarget) || 0
         const timeSinceLastReply = now - lastReply
@@ -579,15 +626,12 @@ async function start() {
         if (timeSinceLastReply < COOLDOWN_PER_CHAT) {
           const remaining = Math.ceil((COOLDOWN_PER_CHAT - timeSinceLastReply) / 1000)
           console.log(`⏳ Cooldown: ${remaining}s`)
-          pushLog(`Cooldown: ${remaining}s`)
           continue
         }
         
         if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) {
           continue
         }
-
-        pushLog(`Processing`)
 
         try {
           await sock.sendPresenceUpdate('composing', sendTarget)
@@ -603,7 +647,6 @@ async function start() {
           ])
           
           replyText = formatMessage(treasury, usdIdr)
-          pushLog('Fetched')
         } catch (e) {
           replyText = '❌ Gagal mengambil data.\n⏱️ Coba lagi nanti.'
           pushLog(`Error: ${e.message}`)
@@ -625,13 +668,11 @@ async function start() {
         lastReplyAtPerChat.set(sendTarget, now)
         lastGlobalReplyAt = now
         
-        console.log(`✅ Sent to ${isGroup ? 'GROUP' : 'DM'}`)
-        pushLog(`Sent`)
+        console.log(`✅ Sent`)
         
         await new Promise(r => setTimeout(r, 2000))
         
       } catch (e) {
-        pushLog(`Error: ${e.message}`)
         console.error('Error:', e)
         await new Promise(r => setTimeout(r, 5000))
       }
@@ -641,6 +682,5 @@ async function start() {
 
 start().catch((e) => {
   console.error('Fatal:', e)
-  pushLog(`Fatal: ${e.message}`)
   process.exit(1)
 })
