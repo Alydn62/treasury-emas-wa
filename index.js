@@ -15,17 +15,12 @@ const PORT = process.env.PORT || 8000
 const TREASURY_URL = process.env.TREASURY_URL ||
   'https://api.treasury.id/api/v1/antigrvty/gold/rate'
 
-// Anti-spam settings (LEBIH KETAT untuk mencegah logout)
-const COOLDOWN_PER_CHAT = 120000 // 2 menit (lebih aman)
-const GLOBAL_THROTTLE = 5000 // 5 detik antar pesan
-const TYPING_DURATION = 6000
-const RANDOM_DELAY_MIN = 3000 // Min 3 detik
-const RANDOM_DELAY_MAX = 7000 // Max 7 detik
-
-// Reconnect backoff
-let reconnectAttempts = 0
-const MAX_RECONNECT_ATTEMPTS = 10 // Lebih banyak attempt
-const BASE_RECONNECT_DELAY = 10000 // 10 detik
+// Anti-spam settings
+const COOLDOWN_PER_CHAT = 60000 // 1 menit per chat
+const GLOBAL_THROTTLE = 3000 // 3 detik antar pesan
+const TYPING_DURATION = 6000 // 6 detik typing
+const RANDOM_DELAY_MIN = 2000 // Min 2 detik
+const RANDOM_DELAY_MAX = 5000 // Max 5 detik
 
 // ------ STATE ------
 let lastQr = null
@@ -34,7 +29,7 @@ const processedMsgIds = new Set()
 const lastReplyAtPerChat = new Map()
 let lastGlobalReplyAt = 0
 let isReady = false
-const msgRetryCounterCache = new NodeCache() // Cache untuk message retry
+const msgRetryCounterCache = new NodeCache()
 
 function pushLog(s) {
   logs.push(`${new Date().toISOString()} ${s}`)
@@ -47,7 +42,7 @@ setInterval(() => {
     const toKeep = idsArray.slice(-1000)
     processedMsgIds.clear()
     toKeep.forEach(id => processedMsgIds.add(id))
-    pushLog(`Cleaned up message IDs, kept ${toKeep.length}`)
+    pushLog(`Cleaned message IDs`)
   }
 }, 30 * 60 * 1000)
 
@@ -84,12 +79,6 @@ function formatRupiah(n) {
   return typeof n === 'number'
     ? n.toLocaleString('id-ID')
     : (Number(n || 0) || 0).toLocaleString('id-ID')
-}
-
-function formatUSD(n) {
-  return typeof n === 'number'
-    ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-    : (Number(n || 0) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 function calculateDiscount(investmentAmount) {
@@ -131,6 +120,7 @@ function calculateProfit(buyRate, sellRate, investmentAmount) {
   }
 }
 
+// Fetch USD/IDR dari Google Finance
 async function fetchUSDIDRFromGoogle() {
   try {
     const url = 'https://www.google.com/finance/quote/USD-IDR'
@@ -142,27 +132,19 @@ async function fetchUSDIDRFromGoogle() {
       }
     })
     
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`)
-    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
     
     const html = await res.text()
     
     let rateMatch = html.match(/class="YMlKec fxKbKc">([0-9,\.]+)</i)
-    if (!rateMatch) {
-      rateMatch = html.match(/data-last-price="([0-9,\.]+)"/i)
-    }
-    if (!rateMatch) {
-      rateMatch = html.match(/USD to IDR[^\d]+([\d,\.]+)/i)
-    }
+    if (!rateMatch) rateMatch = html.match(/data-last-price="([0-9,\.]+)"/i)
+    if (!rateMatch) rateMatch = html.match(/USD to IDR[^\d]+([\d,\.]+)/i)
     
     if (rateMatch && rateMatch[1]) {
       const rateStr = rateMatch[1].replace(/,/g, '')
       const rate = parseFloat(rateStr)
       
       if (rate > 1000 && rate < 50000) {
-        pushLog(`Google Finance USD/IDR: ${rate}`)
-        
         let change = 0
         let changePercent = 0
         const changeMatch = html.match(/class="[^"]*P2Luy[^"]*[^>]*>\s*([+-]?[\d,\.]+)\s*\(([+-]?[\d,\.]+)%\)/i)
@@ -171,49 +153,19 @@ async function fetchUSDIDRFromGoogle() {
           changePercent = parseFloat(changeMatch[2].replace(/,/g, ''))
         }
         
-        return {
-          rate,
-          change,
-          changePercent
-        }
+        return { rate, change, changePercent }
       }
     }
     
     throw new Error('Failed to parse')
   } catch (e) {
     pushLog(`Google Finance error: ${e.message}`)
-    return {
-      rate: 15750,
-      change: 0,
-      changePercent: 0
-    }
+    return { rate: 15750, change: 0, changePercent: 0 }
   }
 }
 
-async function fetchGoldPrice() {
-  try {
-    const res = await fetch('https://api.metals.live/v1/spot/gold')
-    if (res.ok) {
-      const json = await res.json()
-      const data = json[0] || {}
-      return {
-        price: data.price || 2650,
-        change: data.change || 0,
-        changePercent: data.changePct || 0
-      }
-    }
-  } catch (e) {
-    pushLog(`Gold API error: ${e.message}`)
-  }
-  
-  return {
-    price: 2650,
-    change: 0,
-    changePercent: 0
-  }
-}
-
-function formatMessage(treasuryData, goldData, usdIdrData) {
+// Format pesan
+function formatMessage(treasuryData, usdIdrData) {
   const buy = treasuryData?.data?.buying_rate || 0
   const sell = treasuryData?.data?.selling_rate || 0
   const updated = treasuryData?.data?.updated_at || new Date().toISOString()
@@ -221,21 +173,11 @@ function formatMessage(treasuryData, goldData, usdIdrData) {
   const dateStr = updated.split('T')[0] || ''
   const timeStr = updated.split('T')[1]?.substring(0, 5) || ''
   
-  const xauPrice = goldData.price
-  const xauChange = goldData.change
-  const xauChangePercent = goldData.changePercent
-  const xauEmoji = xauChange >= 0 ? '📈' : '📉'
-  const xauSign = xauChange >= 0 ? '+' : ''
-  
   const usdIdrRate = usdIdrData.rate
   const usdIdrChange = usdIdrData.change
   const usdIdrChangePercent = usdIdrData.changePercent
   const usdIdrEmoji = usdIdrChange >= 0 ? '📈' : '📉'
   const usdIdrSign = usdIdrChange >= 0 ? '+' : ''
-  
-  const gramPerOz = 31.1035
-  const xauPricePerGram = xauPrice / gramPerOz
-  const xauPriceIDR = xauPricePerGram * usdIdrRate
   
   const spread = sell - buy
   const spreadPercent = ((spread / buy) * 100).toFixed(2)
@@ -258,6 +200,7 @@ function formatMessage(treasuryData, goldData, usdIdrData) {
 💵 Kurs USD/IDR:
    Rp${formatRupiah(Math.round(usdIdrRate))}
    ${usdIdrSign}Rp${formatRupiah(Math.abs(Math.round(usdIdrChange)))} (${usdIdrSign}${Math.abs(usdIdrChangePercent).toFixed(2)}%) ${usdIdrEmoji}
+
 ━━━━━━━━━━━━━━━━━━━━━
 🎁 *SIMULASI DISKON TREASURY*
 (Diskon hingga Rp1.020.000)
@@ -265,8 +208,8 @@ function formatMessage(treasuryData, goldData, usdIdrData) {
 ${generateDiscountSimulation(buy, sell)}
 
 ━━━━━━━━━━━━━━━━━━━━━
-⏱️ _Bot akan reply 1x per 2 menit_
-📊 _Data real-time dari Google Finance_`
+⏱️ _Bot akan reply 1x per 1 menit_
+📊 _Data real-time_`
 }
 
 function generateDiscountSimulation(buy, sell) {
@@ -358,7 +301,6 @@ app.get('/stats', (_req, res) => {
     uptime: Math.floor(process.uptime()),
     totalChats: lastReplyAtPerChat.size,
     processedMessages: processedMsgIds.size,
-    reconnectAttempts,
     activeChats: Array.from(lastReplyAtPerChat.entries())
       .slice(-10)
       .map(([chat, lastTime]) => ({
@@ -373,13 +315,12 @@ app.get('/stats', (_req, res) => {
 
 app.get('/test', async (_req, res) => {
   try {
-    const [treasury, gold, usdIdr] = await Promise.all([
+    const [treasury, usdIdr] = await Promise.all([
       fetchTreasury(),
-      fetchGoldPrice(),
       fetchUSDIDRFromGoogle()
     ])
     
-    const message = formatMessage(treasury, gold, usdIdr)
+    const message = formatMessage(treasury, usdIdr)
     res.type('text/plain').send(message)
   } catch (e) {
     res.status(500).send(`Error: ${e.message}`)
@@ -408,46 +349,23 @@ async function start() {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger)
     },
-    browser: Browsers.macOS('Desktop'), // PENTING: Gunakan Desktop, bukan Mobile
-    markOnlineOnConnect: false, // PENTING: Jangan auto online
+    browser: Browsers.macOS('Desktop'),
+    markOnlineOnConnect: false,
     syncFullHistory: false,
     defaultQueryTimeoutMs: 60000,
-    keepAliveIntervalMs: 30000, // PENTING: Keep alive setiap 30 detik
+    keepAliveIntervalMs: 30000,
     connectTimeoutMs: 60000,
-    msgRetryCounterCache, // PENTING: Cache untuk retry
+    msgRetryCounterCache,
     generateHighQualityLinkPreview: false,
-    patchMessageBeforeSending: (message) => {
-      // PENTING: Patch message untuk mencegah error
-      const requiresPatch = !!(
-        message.buttonsMessage ||
-        message.templateMessage ||
-        message.listMessage
-      )
-      if (requiresPatch) {
-        message = {
-          viewOnceMessage: {
-            message: {
-              messageContextInfo: {
-                deviceListMetadataVersion: 2,
-                deviceListMetadata: {},
-              },
-              ...message,
-            },
-          },
-        }
-      }
-      return message
-    },
     getMessage: async (key) => {
       return { conversation: '' }
     }
   })
 
-  // PENTING: Handle keepalive
+  // Keep alive ping
   setInterval(() => {
     if (sock && sock.ws && sock.ws.readyState === 1) {
       sock.ws.ping()
-      pushLog('Keepalive ping sent')
     }
   }, 30000)
 
@@ -462,62 +380,44 @@ async function start() {
     
     if (connection === 'close') {
       const reason = lastDisconnect?.error?.output?.statusCode
-      const shouldReconnect = reason !== DisconnectReason.loggedOut
       
       console.log('❌ Connection closed:', reason)
       pushLog(`Closed: ${reason}`)
       
-      // PENTING: Detail error logging
+      // PENTING: Jangan reconnect jika logout
       if (reason === DisconnectReason.loggedOut) {
-        console.log('⚠️  LOGGED OUT - Scan QR lagi!')
-        pushLog('LOGGED OUT - Need QR scan')
-        reconnectAttempts = 0
-        // Jangan reconnect otomatis jika logged out
-        return
+        console.log('⚠️  LOGGED OUT - Silakan scan QR lagi di /qr')
+        pushLog('LOGGED OUT - Manual QR scan required')
+        lastQr = null
+        return // STOP - tidak reconnect
       }
       
-      if (shouldReconnect && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        const delay = BASE_RECONNECT_DELAY * Math.pow(1.5, reconnectAttempts) // Exponential backoff lebih lembut
-        reconnectAttempts++
-        console.log(`⏳ Reconnecting in ${Math.round(delay/1000)}s (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
-        pushLog(`Reconnect attempt ${reconnectAttempts}`)
-        setTimeout(() => start(), delay)
-      } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        console.error('❌ Max reconnect attempts - stopping')
-        pushLog('Max attempts reached')
-        process.exit(1)
-      }
+      // PENTING: Jangan reconnect untuk error lain juga
+      console.log('⚠️  Connection lost - Silakan restart bot atau scan QR lagi')
+      pushLog('Connection lost - Manual restart required')
+      return // STOP - tidak reconnect otomatis
+      
     } else if (connection === 'open') {
       lastQr = null
-      reconnectAttempts = 0
       console.log('✅ WhatsApp connected!')
-      pushLog('Connected successfully')
+      pushLog('Connected')
       
-      // PENTING: Warmup period lebih lama
       isReady = false
-      console.log('⏳ Warmup 30s untuk stabilitas...')
+      console.log('⏳ Warmup 20s...')
       pushLog('Warmup started')
       
       setTimeout(() => {
         isReady = true
-        console.log('🟢 Bot ready to receive messages!')
+        console.log('🟢 Bot ready!')
         pushLog('Bot ready')
-      }, 30000) // 30 detik warmup
+      }, 20000) // 20 detik warmup
     }
   })
 
   sock.ev.on('creds.update', saveCreds)
 
-  // PENTING: Handle presence update untuk tetap terlihat aktif
-  sock.ev.on('presence.update', async (data) => {
-    pushLog(`Presence update: ${data.id}`)
-  })
-
   sock.ev.on('messages.upsert', async (ev) => {
-    if (!isReady) {
-      pushLog('Message ignored - warmup period')
-      return
-    }
+    if (!isReady) return
     if (ev.type !== 'notify') return
     
     for (const msg of ev.messages) {
@@ -534,60 +434,50 @@ async function start() {
         const sendTarget = msg.key.remoteJid
         const now = Date.now()
         
-        // Cooldown check - 2 menit
+        // Cooldown 1 menit
         const lastReply = lastReplyAtPerChat.get(sendTarget) || 0
         if (now - lastReply < COOLDOWN_PER_CHAT) {
-          const remaining = Math.ceil((COOLDOWN_PER_CHAT - (now - lastReply)) / 1000)
-          pushLog(`Cooldown: ${sendTarget} (${remaining}s remaining)`)
+          pushLog(`Cooldown active for ${sendTarget}`)
           continue
         }
         
-        // Global throttle - 5 detik
-        if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) {
-          pushLog('Global throttle active')
-          continue
-        }
+        // Global throttle
+        if (now - lastGlobalReplyAt < GLOBAL_THROTTLE) continue
 
-        pushLog(`Processing message from: ${sendTarget}`)
+        pushLog(`Processing: ${sendTarget}`)
 
-        // Typing indicator
+        // Typing
         try {
           await sock.sendPresenceUpdate('composing', sendTarget)
-          pushLog('Typing indicator sent')
-        } catch (e) {
-          pushLog(`Typing error: ${e.message}`)
-        }
+        } catch (_) {}
         
         await new Promise(r => setTimeout(r, TYPING_DURATION))
 
-        // Fetch data
+        // Fetch data (tanpa XAU/USD)
         let replyText
         try {
-          const [treasury, gold, usdIdr] = await Promise.all([
+          const [treasury, usdIdr] = await Promise.all([
             fetchTreasury(),
-            fetchGoldPrice(),
             fetchUSDIDRFromGoogle()
           ])
           
-          replyText = formatMessage(treasury, gold, usdIdr)
-          pushLog('Data fetched successfully')
+          replyText = formatMessage(treasury, usdIdr)
+          pushLog('Data fetched')
         } catch (e) {
           replyText = '❌ Maaf, gagal mengambil data harga emas.\n\n⏱️ Silakan coba lagi dalam beberapa saat.'
-          pushLog(`Fetch error: ${e.message}`)
+          pushLog(`Error: ${e.message}`)
         }
 
-        // Random delay lebih lama
+        // Random delay
         const randomDelay = Math.floor(Math.random() * (RANDOM_DELAY_MAX - RANDOM_DELAY_MIN)) + RANDOM_DELAY_MIN
         await new Promise(r => setTimeout(r, randomDelay))
         
         // Stop typing
         try {
           await sock.sendPresenceUpdate('paused', sendTarget)
-        } catch (e) {
-          pushLog(`Pause typing error: ${e.message}`)
-        }
+        } catch (_) {}
         
-        // Send message
+        // Send
         await sock.sendMessage(
           sendTarget,
           { text: replyText },
@@ -597,15 +487,14 @@ async function start() {
         lastReplyAtPerChat.set(sendTarget, now)
         lastGlobalReplyAt = now
         
-        console.log(`✅ Reply sent to ${sendTarget}`)
-        pushLog(`Message sent successfully`)
+        console.log(`✅ Sent to ${sendTarget}`)
+        pushLog(`Sent`)
         
-        // Delay setelah send
-        await new Promise(r => setTimeout(r, 3000))
+        await new Promise(r => setTimeout(r, 2000))
         
       } catch (e) {
-        pushLog(`Handler error: ${e.message}`)
-        console.error('Message handler error:', e)
+        pushLog(`Error: ${e.message}`)
+        console.error('Error:', e)
         await new Promise(r => setTimeout(r, 5000))
       }
     }
@@ -613,7 +502,7 @@ async function start() {
 }
 
 start().catch((e) => {
-  console.error('Fatal start error:', e)
+  console.error('Fatal error:', e)
   pushLog(`Fatal: ${e.message}`)
   process.exit(1)
 })
