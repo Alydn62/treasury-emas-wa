@@ -1,6 +1,3 @@
-Baik, berikut kode lengkap dengan interval **1 detik** untuk broadcast ultra real-time:
-
-```javascript
 // index.js
 import makeWASocket, {
   DisconnectReason,
