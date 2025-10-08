@@ -664,7 +664,7 @@ async function fetchTreasury() {
   return json
 }
 
-// ⚡ FIXED BROADCAST FUNCTION - NO MORE DUPLICATES
+// ⚡ FIXED BROADCAST FUNCTION - NO MORE RACE CONDITION
 async function doBroadcast(priceChange) {
   // CRITICAL: Check flag sebelum set
   if (isBroadcasting) {
@@ -698,10 +698,7 @@ async function doBroadcast(priceChange) {
       return
     }
     
-    lastBroadcastedPrice = {
-      buy: treasury?.data?.buying_rate,
-      sell: treasury?.data?.selling_rate
-    }
+    // TIDAK UPDATE lastBroadcastedPrice di sini - sudah di-update di checkPriceUpdate
     
     const message = formatMessage(treasury, usdIdr.rate, xauUsd, priceChange, economicEvents)
     
@@ -820,11 +817,17 @@ async function checkPriceUpdate() {
     const reason = isNewMinute ? '(New minute)' : '(50s passed)'
     pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)} ${reason}`)
     
-    lastBroadcastTime = now
-    
+    // CRITICAL FIX: Hitung finalPriceChange SEBELUM update lastBroadcastedPrice
     const finalPriceChange = {
       buyChange: currentPrice.buy - lastBroadcastedPrice.buy,
       sellChange: currentPrice.sell - lastBroadcastedPrice.sell
+    }
+    
+    // Update timestamp dan price SEBELUM broadcast dimulai
+    lastBroadcastTime = now
+    lastBroadcastedPrice = {
+      buy: currentPrice.buy,
+      sell: currentPrice.sell
     }
     
     // INSTANT BROADCAST - Fire and forget with error handling
@@ -846,7 +849,8 @@ console.log(`🔧 XAU/USD cache: ${XAU_CACHE_DURATION/1000}s`)
 console.log(`📅 Economic calendar: USD High-Impact (2 days, WIB)`)
 console.log(`⚡ Batch size: ${BATCH_SIZE} messages`)
 console.log(`⚡ Batch delay: ${BATCH_DELAY}ms`)
-console.log(`🌍 XAU/USD: TradingView → Investing → Google\n`)
+console.log(`🌍 XAU/USD: TradingView → Investing → Google`)
+console.log(`🐛 Race condition: FIXED\n`)
 
 const app = express()
 app.use(express.json())
