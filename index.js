@@ -1,3 +1,6 @@
+Baik, berikut kode lengkap dengan interval **1 detik** untuk broadcast ultra real-time:
+
+```javascript
 // index.js
 import makeWASocket, {
   DisconnectReason,
@@ -20,7 +23,7 @@ const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
 
 // BROADCAST COOLDOWN
-const PRICE_CHECK_INTERVAL = 5000
+const PRICE_CHECK_INTERVAL = 1000 // 1 DETIK - ULTRA REAL-TIME!
 const MIN_PRICE_CHANGE = 1
 const BROADCAST_COOLDOWN = 50000 // 50 detik antar broadcast (atau ganti menit)
 
@@ -244,7 +247,16 @@ function formatEconomicCalendar(events) {
   events.forEach((event, index) => {
     const eventDate = new Date(event.date)
     const wibTime = new Date(eventDate.getTime() + (7 * 60 * 60 * 1000))
-    const timeStr = wibTime.toTimeString().substring(0, 5)
+    
+    // Bulatkan ke 5 menit terdekat
+    const minutes = wibTime.getMinutes()
+    const roundedMinutes = Math.round(minutes / 5) * 5
+    wibTime.setMinutes(roundedMinutes)
+    wibTime.setSeconds(0)
+    
+    const hours = wibTime.getHours().toString().padStart(2, '0')
+    const mins = wibTime.getMinutes().toString().padStart(2, '0')
+    const timeStr = `${hours}:${mins}`
     
     // Nama hari
     const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
@@ -655,9 +667,11 @@ async function fetchTreasury() {
   return json
 }
 
-// ⚡ ZERO DELAY BROADCAST FUNCTION
+// ⚡ FIXED BROADCAST FUNCTION - NO MORE DUPLICATES
 async function doBroadcast(priceChange) {
+  // CRITICAL: Check flag sebelum set
   if (isBroadcasting) {
+    pushLog(`⚠️  Broadcast already in progress, skipping...`)
     return
   }
 
@@ -671,6 +685,8 @@ async function doBroadcast(priceChange) {
   }
 
   try {
+    pushLog(`📤 [#${currentBroadcastId}] Starting broadcast...`)
+    
     // Fetch semua data PARALLEL
     const [treasury, usdIdr, xauUsd, economicEvents] = await Promise.all([
       fetchTreasury(),
@@ -678,6 +694,12 @@ async function doBroadcast(priceChange) {
       fetchXAUUSDCached(),
       fetchEconomicCalendar()
     ])
+    
+    // Check lagi sebelum broadcast (double safety)
+    if (!sock || !isReady) {
+      pushLog(`⚠️  Bot not ready, aborting broadcast #${currentBroadcastId}`)
+      return
+    }
     
     lastBroadcastedPrice = {
       buy: treasury?.data?.buying_rate,
@@ -719,11 +741,12 @@ async function doBroadcast(priceChange) {
     
     pushLog(`✅ [#${currentBroadcastId}] Sent: ${successCount}, Failed: ${failCount}`)
     
-  } catch (e) {
-    pushLog(`❌ Broadcast error: ${e.message}`)
+} catch (e) {
+    pushLog(`❌ Broadcast #${currentBroadcastId} error: ${e.message}`)
+  } finally {
+    // ALWAYS release flag in finally block
+    isBroadcasting = false
   }
-  
-  isBroadcasting = false
 }
 
 async function checkPriceUpdate() {
@@ -749,7 +772,7 @@ async function checkPriceUpdate() {
     
     if (!buyChanged && !sellChanged) return
     
-const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
+    const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
     const sellChangeSinceBroadcast = Math.abs(currentPrice.sell - (lastBroadcastedPrice?.sell || currentPrice.sell))
     
     if (buyChangeSinceBroadcast < MIN_PRICE_CHANGE && sellChangeSinceBroadcast < MIN_PRICE_CHANGE) {
@@ -807,8 +830,10 @@ const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPric
       sellChange: currentPrice.sell - lastBroadcastedPrice.sell
     }
     
-    // INSTANT BROADCAST - Fire and forget (no await)
-    doBroadcast(finalPriceChange)
+    // INSTANT BROADCAST - Fire and forget with error handling
+    doBroadcast(finalPriceChange).catch(e => {
+      pushLog(`❌ Broadcast promise error: ${e.message}`)
+    })
     
   } catch (e) {
     // Silent fail
@@ -818,7 +843,7 @@ const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPric
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 
 console.log(`✅ Broadcast: 50s cooldown OR new minute`)
-console.log(`📊 Price check: every ${PRICE_CHECK_INTERVAL/1000}s`)
+console.log(`📊 Price check: every ${PRICE_CHECK_INTERVAL/1000}s (ULTRA REAL-TIME!)`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`🔧 XAU/USD cache: ${XAU_CACHE_DURATION/1000}s`)
 console.log(`📅 Economic calendar: USD High-Impact (2 days, WIB)`)
@@ -1028,14 +1053,14 @@ async function start() {
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD (2 hari)'
+              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD (2 hari)\n⚡ Ultra real-time (1 detik check interval)'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`➕ New sub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD high-impact (2 hari)\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD high-impact (2 hari)\n⚡ Ultra real-time (1 detik check interval)\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
