@@ -48,7 +48,7 @@ const XAU_CACHE_DURATION = 30000
 // Cache untuk Economic Calendar
 let cachedEconomicEvents = null
 let lastEconomicFetch = 0
-const ECONOMIC_CACHE_DURATION = 600000
+const ECONOMIC_CACHE_DURATION = 300000 // 5 menit (lebih sering refresh untuk window 3 jam)
 
 let lastKnownPrice = null
 let lastBroadcastedPrice = null
@@ -195,6 +195,14 @@ async function fetchEconomicCalendar() {
       const eventWIB = new Date(eventDate.getTime() + (7 * 60 * 60 * 1000))
       const eventDateOnly = new Date(eventWIB.getFullYear(), eventWIB.getMonth(), eventWIB.getDate())
       
+      // ⏰ LOGIC BARU: Tampilkan news 3 jam setelah rilis
+      const threeHoursAfterEvent = new Date(eventDate.getTime() + (3 * 60 * 60 * 1000))
+      
+      // Jika news sudah lewat 3 jam, skip
+      if (Date.now() > threeHoursAfterEvent.getTime()) {
+        return false
+      }
+      
       // Filter: hanya hari ini dan besok (2 hari)
       if (eventDateOnly < todayJakarta || eventDateOnly >= dayAfterTomorrowJakarta) {
         return false
@@ -220,7 +228,7 @@ async function fetchEconomicCalendar() {
     // Limit to 10 events
     const limitedEvents = filteredEvents.slice(0, 10)
     
-    pushLog(`📅 Found ${limitedEvents.length} USD high-impact events (next 2 days)`)
+    pushLog(`📅 Found ${limitedEvents.length} USD high-impact events (showing 3hrs window)`)
     
     cachedEconomicEvents = limitedEvents
     lastEconomicFetch = now
@@ -233,19 +241,76 @@ async function fetchEconomicCalendar() {
   }
 }
 
+// Fungsi untuk menentukan apakah news bagus/jelek untuk gold
+function analyzeGoldImpact(event) {
+  const title = (event.title || '').toLowerCase()
+  const actual = event.actual || ''
+  const forecast = event.forecast || ''
+  
+  if (!actual || actual === '-' || !forecast || forecast === '-') {
+    return null
+  }
+  
+  const actualNum = parseFloat(actual.replace(/[^0-9.-]/g, ''))
+  const forecastNum = parseFloat(forecast.replace(/[^0-9.-]/g, ''))
+  
+  if (isNaN(actualNum) || isNaN(forecastNum)) {
+    return null
+  }
+  
+  // Logic: news yang memperkuat USD = jelek untuk gold
+  // news yang melemahkan USD = bagus untuk gold
+  
+  // Interest Rate: Naik = USD kuat = jelek untuk gold
+  if (title.includes('interest rate') || title.includes('fed') || title.includes('fomc')) {
+    return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
+  }
+  
+  // NFP / Employment: Naik = ekonomi kuat = USD kuat = jelek untuk gold
+  if (title.includes('non-farm') || title.includes('nfp') || title.includes('payroll')) {
+    return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
+  }
+  
+  // Unemployment: Naik = ekonomi lemah = USD lemah = bagus untuk gold
+  if (title.includes('unemployment')) {
+    return actualNum > forecastNum ? 'BAGUS' : 'JELEK'
+  }
+  
+  // CPI / Inflation: Naik = inflasi tinggi = bagus untuk gold
+  if (title.includes('cpi') || title.includes('inflation') || title.includes('pce')) {
+    return actualNum > forecastNum ? 'BAGUS' : 'JELEK'
+  }
+  
+  // GDP: Naik = ekonomi kuat = USD kuat = jelek untuk gold
+  if (title.includes('gdp')) {
+    return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
+  }
+  
+  // Jobless Claims: Naik = ekonomi lemah = bagus untuk gold
+  if (title.includes('jobless') || title.includes('claims')) {
+    return actualNum > forecastNum ? 'BAGUS' : 'JELEK'
+  }
+  
+  // Retail Sales: Naik = ekonomi kuat = jelek untuk gold
+  if (title.includes('retail sales')) {
+    return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
+  }
+  
+  return null
+}
+
 function formatEconomicCalendar(events) {
   if (!events || events.length === 0) {
     return ''
   }
   
-  let calendarText = '\n\n📅 *Kalender Ekonomi USD (2 Hari)*\n'
+  let calendarText = '\n\n📅 *Kalender Ekonomi USD*\n'
   calendarText += '━━━━━━━━━━━━━━━━━━━━\n'
   
   events.forEach((event, index) => {
     const eventDate = new Date(event.date)
     const wibTime = new Date(eventDate.getTime() + (7 * 60 * 60 * 1000))
     
-    // Bulatkan ke 5 menit terdekat
     const minutes = wibTime.getMinutes()
     const roundedMinutes = Math.round(minutes / 5) * 5
     wibTime.setMinutes(roundedMinutes)
@@ -255,18 +320,55 @@ function formatEconomicCalendar(events) {
     const mins = wibTime.getMinutes().toString().padStart(2, '0')
     const timeStr = `${hours}:${mins}`
     
-    // Nama hari
     const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
     const dayName = days[wibTime.getDay()]
     
     const title = event.title || event.event || 'Unknown Event'
     const forecast = event.forecast || '-'
     const previous = event.previous || '-'
+    const actual = event.actual || '-'
     
-    calendarText += `${index + 1}. 🕐 ${dayName}, ${timeStr} WIB\n`
+    const nowTime = Date.now()
+    const eventTime = eventDate.getTime()
+    const timeSinceEvent = nowTime - eventTime
+    const minutesSinceEvent = Math.floor(timeSinceEvent / (60 * 1000))
+    
+    let timeStatus = ''
+    if (timeSinceEvent < 0) {
+      const minutesUntil = Math.abs(minutesSinceEvent)
+      if (minutesUntil < 60) {
+        timeStatus = ` ⏰ ${minutesUntil} menit lagi`
+      } else {
+        const hoursUntil = Math.floor(minutesUntil / 60)
+        const minsUntil = minutesUntil % 60
+        timeStatus = ` ⏰ ${hoursUntil}j ${minsUntil}m lagi`
+      }
+    } else if (timeSinceEvent > 0 && timeSinceEvent <= 3 * 60 * 60 * 1000) {
+      const hoursAgo = Math.floor(minutesSinceEvent / 60)
+      const minsAgo = minutesSinceEvent % 60
+      if (hoursAgo > 0) {
+        timeStatus = ` ✅ ${hoursAgo}j ${minsAgo}m lalu`
+      } else {
+        timeStatus = ` ✅ ${minsAgo}m lalu`
+      }
+    }
+    
+    calendarText += `${index + 1}. 🕐 ${dayName}, ${timeStr} WIB${timeStatus}\n`
     calendarText += `    📊 ${title}\n`
     
-    if (forecast !== '-' || previous !== '-') {
+    if (actual !== '-' && actual !== '') {
+      const goldImpact = analyzeGoldImpact(event)
+      
+      if (goldImpact === 'BAGUS') {
+        calendarText += `    ✅ Actual: ${actual} | Forecast: ${forecast}\n`
+        calendarText += `    🟢 NEWS BAGUS UNTUK GOLD\n`
+      } else if (goldImpact === 'JELEK') {
+        calendarText += `    ✅ Actual: ${actual} | Forecast: ${forecast}\n`
+        calendarText += `    🔴 NEWS JELEK UNTUK GOLD\n`
+      } else {
+        calendarText += `    ✅ Actual: ${actual} | Forecast: ${forecast} | Prev: ${previous}\n`
+      }
+    } else if (forecast !== '-' || previous !== '-') {
       calendarText += `    📈 Forecast: ${forecast} | Prev: ${previous}\n`
     }
     
@@ -276,7 +378,7 @@ function formatEconomicCalendar(events) {
   })
   
   calendarText += '\n━━━━━━━━━━━━━━━━━━━━\n'
-  calendarText += '⚠️ High Impact Events Only'
+  calendarText += '⚠️ High Impact | Auto-hide after 3hrs'
   
   return calendarText
 }
@@ -613,7 +715,7 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
     statusSection = `${analysis.emoji} ${analysis.message}\n`
   }
   
-  const buyFormatted = `Rp${formatRupiah(buy)}/gr`
+const buyFormatted = `Rp${formatRupiah(buy)}/gr`
   const sellFormatted = `Rp${formatRupiah(sell)}/gr`
   const spreadFormatted = `Rp${formatRupiah(Math.abs(spread))} (-${spreadPercent}%)`
   
@@ -698,8 +800,6 @@ async function doBroadcast(priceChange) {
       return
     }
     
-    // TIDAK UPDATE lastBroadcastedPrice di sini - sudah di-update di checkPriceUpdate
-    
     const message = formatMessage(treasury, usdIdr.rate, xauUsd, priceChange, economicEvents)
     
     pushLog(`📤 [#${currentBroadcastId}] Broadcasting to ${subscriptions.size} subs`)
@@ -735,7 +835,7 @@ async function doBroadcast(priceChange) {
     
     pushLog(`✅ [#${currentBroadcastId}] Sent: ${successCount}, Failed: ${failCount}`)
     
-} catch (e) {
+  } catch (e) {
     pushLog(`❌ Broadcast #${currentBroadcastId} error: ${e.message}`)
   } finally {
     // ALWAYS release flag in finally block
@@ -846,7 +946,7 @@ console.log(`✅ Broadcast: 50s cooldown OR new minute`)
 console.log(`📊 Price check: every ${PRICE_CHECK_INTERVAL/1000}s (ULTRA REAL-TIME!)`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`🔧 XAU/USD cache: ${XAU_CACHE_DURATION/1000}s`)
-console.log(`📅 Economic calendar: USD High-Impact (2 days, WIB)`)
+console.log(`📅 Economic calendar: USD High-Impact (auto-hide 3hrs, WIB)`)
 console.log(`⚡ Batch size: ${BATCH_SIZE} messages`)
 console.log(`⚡ Batch delay: ${BATCH_DELAY}ms`)
 console.log(`🌍 XAU/USD: TradingView → Investing → Google`)
@@ -1054,14 +1154,14 @@ async function start() {
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD (2 hari)\n⚡ Ultra real-time (1 detik check interval)'
+              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD (auto-hide 3 jam)\n⚡ Ultra real-time (1 detik check interval)'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`➕ New sub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD high-impact (2 hari)\n⚡ Ultra real-time (1 detik check interval)\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD high-impact (auto-hide 3 jam)\n⚡ Ultra real-time (1 detik check interval)\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
