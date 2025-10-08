@@ -22,7 +22,7 @@ const TYPING_DURATION = 2000
 // BROADCAST COOLDOWN
 const PRICE_CHECK_INTERVAL = 5000
 const MIN_PRICE_CHANGE = 1
-const BROADCAST_COOLDOWN = 50000 // 50 detik antar broadcast
+const BROADCAST_COOLDOWN = 50000 // 50 detik antar broadcast (atau ganti menit)
 
 // Economic Calendar Settings
 const ECONOMIC_CALENDAR_ENABLED = true
@@ -181,34 +181,46 @@ async function fetchEconomicCalendar() {
     
     const events = await res.json()
     
-    const today = new Date()
-    const year = today.getFullYear()
-    const month = String(today.getMonth() + 1).padStart(2, '0')
-    const day = String(today.getDate()).padStart(2, '0')
-    const todayStr = `${year}-${month}-${day}`
+    // Waktu Jakarta (WIB = UTC+7)
+    const jakartaNow = new Date(Date.now() + (7 * 60 * 60 * 1000))
+    const todayJakarta = new Date(jakartaNow.getFullYear(), jakartaNow.getMonth(), jakartaNow.getDate())
+    const tomorrowJakarta = new Date(todayJakarta.getTime() + (24 * 60 * 60 * 1000))
+    const dayAfterTomorrowJakarta = new Date(todayJakarta.getTime() + (2 * 24 * 60 * 60 * 1000))
     
     const filteredEvents = events.filter(event => {
       if (!event.date) return false
-      const eventDate = event.date.split('T')[0]
-      if (eventDate !== todayStr) return false
       
+      // Parse event date dan convert ke WIB
+      const eventDate = new Date(event.date)
+      const eventWIB = new Date(eventDate.getTime() + (7 * 60 * 60 * 1000))
+      const eventDateOnly = new Date(eventWIB.getFullYear(), eventWIB.getMonth(), eventWIB.getDate())
+      
+      // Filter: hanya hari ini dan besok (2 hari)
+      if (eventDateOnly < todayJakarta || eventDateOnly >= dayAfterTomorrowJakarta) {
+        return false
+      }
+      
+      // Filter: hanya USD
       if (!CALENDAR_COUNTRY_FILTER.includes(event.country)) return false
       
+      // Filter: hanya High Impact
       const impactValue = event.impact === 'High' || event.importance === 3
       if (!impactValue) return false
       
       return true
     })
     
+    // Sort by time
     filteredEvents.sort((a, b) => {
       const timeA = new Date(a.date).getTime()
       const timeB = new Date(b.date).getTime()
       return timeA - timeB
     })
     
-    const limitedEvents = filteredEvents.slice(0, 5)
+    // Limit to 10 events
+    const limitedEvents = filteredEvents.slice(0, 10)
     
-    pushLog(`📅 Found ${limitedEvents.length} USD high-impact events today`)
+    pushLog(`📅 Found ${limitedEvents.length} USD high-impact events (next 2 days)`)
     
     cachedEconomicEvents = limitedEvents
     lastEconomicFetch = now
@@ -226,7 +238,7 @@ function formatEconomicCalendar(events) {
     return ''
   }
   
-  let calendarText = '\n\n📅 *Kalender Ekonomi USD Hari Ini*\n'
+  let calendarText = '\n\n📅 *Kalender Ekonomi USD (2 Hari)*\n'
   calendarText += '━━━━━━━━━━━━━━━━━━━━\n'
   
   events.forEach((event, index) => {
@@ -234,21 +246,27 @@ function formatEconomicCalendar(events) {
     const wibTime = new Date(eventDate.getTime() + (7 * 60 * 60 * 1000))
     const timeStr = wibTime.toTimeString().substring(0, 5)
     
+    // Nama hari
+    const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
+    const dayName = days[wibTime.getDay()]
+    
     const title = event.title || event.event || 'Unknown Event'
     const forecast = event.forecast || '-'
     const previous = event.previous || '-'
     
-    calendarText += `${index + 1}. 🕐 ${timeStr} WIB\n`
-    calendarText += `   📊 ${title}\n`
+    calendarText += `${index + 1}. 🕐 ${dayName}, ${timeStr} WIB\n`
+    calendarText += `    📊 ${title}\n`
     
     if (forecast !== '-' || previous !== '-') {
-      calendarText += `   📈 Forecast: ${forecast} | Prev: ${previous}\n`
+      calendarText += `    📈 Forecast: ${forecast} | Prev: ${previous}\n`
     }
     
-    calendarText += '\n'
+    if (index < events.length - 1) {
+      calendarText += '\n'
+    }
   })
   
-  calendarText += '━━━━━━━━━━━━━━━━━━━━\n'
+  calendarText += '\n━━━━━━━━━━━━━━━━━━━━\n'
   calendarText += '⚠️ High Impact Events Only'
   
   return calendarText
@@ -618,8 +636,8 @@ ${marketSection}
 
 🎁 Promo
 💰 Rp20 Juta ➜ ${formatGrams(grams20M)} gr | Profit: +Rp${formatRupiah(Math.round(profit20M))} 🚀
-💰 Rp30 Juta ➜ ${formatGrams(grams30M)} gr | Profit: +Rp${formatRupiah(Math.round(profit30M))} 🚀
-${calendarSection}
+💰 Rp30 Juta ➜ ${formatGrams(grams30M)} gr | Profit: +Rp${formatRupiah(Math.round(profit30M))} 🚀${calendarSection}
+
 ⚡ Harga diperbarui otomatis`
 }
 
@@ -731,7 +749,7 @@ async function checkPriceUpdate() {
     
     if (!buyChanged && !sellChanged) return
     
-    const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
+const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
     const sellChangeSinceBroadcast = Math.abs(currentPrice.sell - (lastBroadcastedPrice?.sell || currentPrice.sell))
     
     if (buyChangeSinceBroadcast < MIN_PRICE_CHANGE && sellChangeSinceBroadcast < MIN_PRICE_CHANGE) {
@@ -742,8 +760,17 @@ async function checkPriceUpdate() {
     const now = Date.now()
     const timeSinceLastBroadcast = now - lastBroadcastTime
     
-    // Jangan broadcast jika baru saja broadcast dalam 50 detik terakhir
-    if (timeSinceLastBroadcast < BROADCAST_COOLDOWN) {
+    // Cek apakah sudah ganti menit
+    const lastBroadcastDate = new Date(lastBroadcastTime)
+    const currentDate = new Date(now)
+    const lastMinute = lastBroadcastDate.getHours() * 60 + lastBroadcastDate.getMinutes()
+    const currentMinute = currentDate.getHours() * 60 + currentDate.getMinutes()
+    const isNewMinute = currentMinute !== lastMinute
+    
+    // Jangan broadcast jika:
+    // 1. Belum 50 detik DAN
+    // 2. Masih di menit yang sama
+    if (timeSinceLastBroadcast < BROADCAST_COOLDOWN && !isNewMinute) {
       const priceChange = {
         buyChange: currentPrice.buy - lastKnownPrice.buy,
         sellChange: currentPrice.sell - lastKnownPrice.sell
@@ -755,7 +782,7 @@ async function checkPriceUpdate() {
       const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
       const sellIcon = priceChange.sellChange > 0 ? '📈' : '📉'
       
-      pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)} (⏳ Wait ${Math.round((BROADCAST_COOLDOWN - timeSinceLastBroadcast)/1000)}s)`)
+      pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)} (⏳ Wait ${Math.round((BROADCAST_COOLDOWN - timeSinceLastBroadcast)/1000)}s or next minute)`)
       return
     }
     
@@ -770,7 +797,8 @@ async function checkPriceUpdate() {
     const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
     const sellIcon = priceChange.sellChange > 0 ? '📈' : '📉'
     
-    pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)}`)
+    const reason = isNewMinute ? '(New minute)' : '(50s passed)'
+    pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)} ${reason}`)
     
     lastBroadcastTime = now
     
@@ -789,11 +817,11 @@ async function checkPriceUpdate() {
 
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 
-console.log(`✅ Broadcast cooldown: ${BROADCAST_COOLDOWN/1000}s`)
+console.log(`✅ Broadcast: 50s cooldown OR new minute`)
 console.log(`📊 Price check: every ${PRICE_CHECK_INTERVAL/1000}s`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`🔧 XAU/USD cache: ${XAU_CACHE_DURATION/1000}s`)
-console.log(`📅 Economic calendar: USD High-Impact only`)
+console.log(`📅 Economic calendar: USD High-Impact (2 days, WIB)`)
 console.log(`⚡ Batch size: ${BATCH_SIZE} messages`)
 console.log(`⚡ Batch delay: ${BATCH_DELAY}ms`)
 console.log(`🌍 XAU/USD: TradingView → Investing → Google\n`)
@@ -836,7 +864,7 @@ app.get('/stats', (_req, res) => {
     lastPrice: lastKnownPrice,
     lastBroadcasted: lastBroadcastedPrice,
     broadcastCount: broadcastCount,
-    lastBroadcastTime: new Date(lastBroadcastTime).toISOString(),
+    lastBroadcastTime: lastBroadcastTime > 0 ? new Date(lastBroadcastTime).toISOString() : null,
     timeSinceLastBroadcast: lastBroadcastTime > 0 ? Math.floor((Date.now() - lastBroadcastTime) / 1000) : null,
     cachedXAUUSD: cachedXAUUSD,
     cachedEconomicEvents: cachedEconomicEvents,
@@ -1000,14 +1028,14 @@ async function start() {
         if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Max 1x broadcast per 50 detik\n📅 Termasuk kalender ekonomi USD'
+              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD (2 hari)'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`➕ New sub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
             
             await sock.sendMessage(sendTarget, {
-              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Max 1x broadcast per 50 detik\n📅 Termasuk kalender ekonomi USD high-impact\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD high-impact (2 hari)\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
