@@ -48,7 +48,7 @@ const XAU_CACHE_DURATION = 30000
 // Cache untuk Economic Calendar
 let cachedEconomicEvents = null
 let lastEconomicFetch = 0
-const ECONOMIC_CACHE_DURATION = 300000 // 5 menit (lebih sering refresh untuk window 3 jam)
+const ECONOMIC_CACHE_DURATION = 300000 // 5 menit
 
 let lastKnownPrice = null
 let lastBroadcastedPrice = null
@@ -195,7 +195,7 @@ async function fetchEconomicCalendar() {
       const eventWIB = new Date(eventDate.getTime() + (7 * 60 * 60 * 1000))
       const eventDateOnly = new Date(eventWIB.getFullYear(), eventWIB.getMonth(), eventWIB.getDate())
       
-      // ⏰ LOGIC BARU: Tampilkan news 3 jam setelah rilis
+      // ⏰ LOGIC: Tampilkan news 3 jam setelah rilis
       const threeHoursAfterEvent = new Date(eventDate.getTime() + (3 * 60 * 60 * 1000))
       
       // Jika news sudah lewat 3 jam, skip
@@ -766,8 +766,8 @@ async function fetchTreasury() {
   return json
 }
 
-// ⚡ FIXED BROADCAST FUNCTION - NO MORE RACE CONDITION
-async function doBroadcast(priceChange) {
+// ⚡ UPDATED BROADCAST FUNCTION dengan validasi timestamp
+async function doBroadcast(priceChange, priceData) {
   // CRITICAL: Check flag sebelum set
   if (isBroadcasting) {
     pushLog(`⚠️  Broadcast already in progress, skipping...`)
@@ -784,11 +784,43 @@ async function doBroadcast(priceChange) {
   }
 
   try {
+    // ✅ VALIDASI TIMESTAMP: Pastikan harga masih fresh (max 3 detik)
+    const priceAge = Date.now() - priceData.fetchedAt
+    if (priceAge > 3000) {
+      pushLog(`⚠️  [#${currentBroadcastId}] Price too old (${Math.round(priceAge/1000)}s), fetching fresh data...`)
+      
+      // Fetch ulang harga terbaru
+      try {
+        const freshTreasury = await fetchTreasury()
+        const freshPrice = {
+          buy: freshTreasury?.data?.buying_rate,
+          sell: freshTreasury?.data?.selling_rate,
+          updated_at: freshTreasury?.data?.updated_at,
+          fetchedAt: Date.now()
+        }
+        
+        // Update priceData dengan data fresh
+        priceData = freshPrice
+        
+        // Recalculate priceChange
+        priceChange = {
+          buyChange: freshPrice.buy - lastBroadcastedPrice.buy,
+          sellChange: freshPrice.sell - lastBroadcastedPrice.sell
+        }
+        
+        pushLog(`✅ [#${currentBroadcastId}] Fresh data: Buy=${formatRupiah(freshPrice.buy)}, Sell=${formatRupiah(freshPrice.sell)}`)
+        
+      } catch (e) {
+        pushLog(`❌ [#${currentBroadcastId}] Failed to fetch fresh data: ${e.message}`)
+        isBroadcasting = false
+        return
+      }
+    }
+    
     pushLog(`📤 [#${currentBroadcastId}] Starting broadcast...`)
     
-    // Fetch semua data PARALLEL
-    const [treasury, usdIdr, xauUsd, economicEvents] = await Promise.all([
-      fetchTreasury(),
+    // Fetch market data PARALLEL (tapi treasury sudah ada dari priceData)
+    const [usdIdr, xauUsd, economicEvents] = await Promise.all([
       fetchUSDIDRFromGoogle(),
       fetchXAUUSDCached(),
       fetchEconomicCalendar()
@@ -800,7 +832,16 @@ async function doBroadcast(priceChange) {
       return
     }
     
-    const message = formatMessage(treasury, usdIdr.rate, xauUsd, priceChange, economicEvents)
+    // Buat treasury data object dari priceData
+    const treasuryData = {
+      data: {
+        buying_rate: priceData.buy,
+        selling_rate: priceData.sell,
+        updated_at: priceData.updated_at
+      }
+    }
+    
+    const message = formatMessage(treasuryData, usdIdr.rate, xauUsd, priceChange, economicEvents)
     
     pushLog(`📤 [#${currentBroadcastId}] Broadcasting to ${subscriptions.size} subs`)
     
@@ -851,7 +892,8 @@ async function checkPriceUpdate() {
     const currentPrice = {
       buy: treasuryData?.data?.buying_rate,
       sell: treasuryData?.data?.selling_rate,
-      updated_at: treasuryData?.data?.updated_at
+      updated_at: treasuryData?.data?.updated_at,
+      fetchedAt: Date.now() // ✅ TAMBAHKAN TIMESTAMP FETCH
     }
 
     if (!lastKnownPrice) {
@@ -923,15 +965,32 @@ async function checkPriceUpdate() {
       sellChange: currentPrice.sell - lastBroadcastedPrice.sell
     }
     
+    // ✅ VALIDASI: Hanya broadcast jika harga masih di menit yang sama
+    const priceFetchTime = new Date(currentPrice.fetchedAt)
+    const nowTime = new Date(Date.now())
+    const priceMinute = priceFetchTime.getHours() * 60 + priceFetchTime.getMinutes()
+    const nowMinute = nowTime.getHours() * 60 + nowTime.getMinutes()
+    
+    if (priceMinute !== nowMinute) {
+      pushLog(`⚠️  Price dari menit lain (${priceMinute} vs ${nowMinute}), skip broadcast`)
+      lastBroadcastedPrice = {
+        buy: currentPrice.buy,
+        sell: currentPrice.sell,
+        fetchedAt: currentPrice.fetchedAt
+      }
+      return
+    }
+    
     // Update timestamp dan price SEBELUM broadcast dimulai
     lastBroadcastTime = now
     lastBroadcastedPrice = {
       buy: currentPrice.buy,
-      sell: currentPrice.sell
+      sell: currentPrice.sell,
+      fetchedAt: currentPrice.fetchedAt
     }
     
     // INSTANT BROADCAST - Fire and forget with error handling
-    doBroadcast(finalPriceChange).catch(e => {
+    doBroadcast(finalPriceChange, currentPrice).catch(e => {
       pushLog(`❌ Broadcast promise error: ${e.message}`)
     })
     
@@ -950,7 +1009,8 @@ console.log(`📅 Economic calendar: USD High-Impact (auto-hide 3hrs, WIB)`)
 console.log(`⚡ Batch size: ${BATCH_SIZE} messages`)
 console.log(`⚡ Batch delay: ${BATCH_DELAY}ms`)
 console.log(`🌍 XAU/USD: TradingView → Investing → Google`)
-console.log(`🐛 Race condition: FIXED\n`)
+console.log(`🐛 Race condition: FIXED`)
+console.log(`⏰ Timestamp validation: ACTIVE\n`)
 
 const app = express()
 app.use(express.json())
