@@ -56,6 +56,10 @@ let isBroadcasting = false
 let broadcastCount = 0
 let lastBroadcastTime = 0
 
+// ⏱️ STALE PRICE DETECTION
+let lastPriceUpdateTime = 0  // Kapan terakhir harga berubah dari API
+const STALE_PRICE_THRESHOLD = 5 * 60 * 1000  // 5 menit
+
 // Reconnect settings
 let reconnectAttempts = 0
 const MAX_RECONNECT_ATTEMPTS = 10
@@ -71,6 +75,34 @@ let isReady = false
 let sock = null
 
 const subscriptions = new Set()
+
+// ⚡ CACHE GLOBAL untuk market data (pre-fetched)
+let cachedMarketData = {
+  usdIdr: { rate: 15750 },
+  xauUsd: null,
+  economicEvents: null,
+  lastUpdate: 0
+}
+
+// Background task untuk pre-fetch market data
+setInterval(async () => {
+  try {
+    const [usdIdr, xauUsd, economicEvents] = await Promise.all([
+      fetchUSDIDRFromGoogle(),
+      fetchXAUUSDCached(),
+      fetchEconomicCalendar()
+    ])
+    
+    cachedMarketData = {
+      usdIdr,
+      xauUsd,
+      economicEvents,
+      lastUpdate: Date.now()
+    }
+  } catch (e) {
+    // Silent fail - keep old cache
+  }
+}, 5000) // Update every 5 seconds
 
 function pushLog(s) {
   const logMsg = `${new Date().toISOString().substring(11, 19)} ${s}`
@@ -304,8 +336,7 @@ function formatEconomicCalendar(events) {
     return ''
   }
   
-  let calendarText = '\n\n📅 *Kalender Ekonomi USD*\n'
-  calendarText += '━━━━━━━━━━━━━━━━━━━━\n'
+  let calendarText = '\n📅 USD News\n'
   
   events.forEach((event, index) => {
     const eventDate = new Date(event.date)
@@ -337,48 +368,60 @@ function formatEconomicCalendar(events) {
     if (timeSinceEvent < 0) {
       const minutesUntil = Math.abs(minutesSinceEvent)
       if (minutesUntil < 60) {
-        timeStatus = ` ⏰ ${minutesUntil} menit lagi`
+        timeStatus = `⏰${minutesUntil}m`
       } else {
         const hoursUntil = Math.floor(minutesUntil / 60)
         const minsUntil = minutesUntil % 60
-        timeStatus = ` ⏰ ${hoursUntil}j ${minsUntil}m lagi`
+        if (minsUntil > 0) {
+          timeStatus = `⏰${hoursUntil}j ${minsUntil}m`
+        } else {
+          timeStatus = `⏰${hoursUntil}j`
+        }
       }
     } else if (timeSinceEvent > 0 && timeSinceEvent <= 3 * 60 * 60 * 1000) {
       const hoursAgo = Math.floor(minutesSinceEvent / 60)
       const minsAgo = minutesSinceEvent % 60
       if (hoursAgo > 0) {
-        timeStatus = ` ✅ ${hoursAgo}j ${minsAgo}m lalu`
+        timeStatus = `✅${hoursAgo}j ${minsAgo}m lalu`
       } else {
-        timeStatus = ` ✅ ${minsAgo}m lalu`
+        timeStatus = `✅${minsAgo}m lalu`
       }
     }
     
-    calendarText += `${index + 1}. 🕐 ${dayName}, ${timeStr} WIB${timeStatus}\n`
-    calendarText += `    📊 ${title}\n`
+    // Shortened title
+    let shortTitle = title
+    if (title.includes('Non-Farm')) shortTitle = 'NFP'
+    else if (title.includes('Unemployment')) shortTitle = 'Unemp'
+    else if (title.includes('Interest Rate')) shortTitle = 'Interest'
+    else if (title.includes('CPI')) shortTitle = 'CPI'
+    else if (title.includes('GDP')) shortTitle = 'GDP'
+    else if (title.includes('Retail')) shortTitle = 'Retail'
+    else if (title.includes('Jobless')) shortTitle = 'Jobless'
+    
+    calendarText += `• ${dayName} ${timeStr}`
+    
+    if (timeStatus) {
+      calendarText += ` (${timeStatus})`
+    }
+    
+    calendarText += ` ${shortTitle}`
     
     if (actual !== '-' && actual !== '') {
       const goldImpact = analyzeGoldImpact(event)
       
+      calendarText += ` ${actual}>${forecast}`
+      
       if (goldImpact === 'BAGUS') {
-        calendarText += `    ✅ Actual: ${actual} | Forecast: ${forecast}\n`
-        calendarText += `    🟢 NEWS BAGUS UNTUK GOLD\n`
+        calendarText += ` 🟢 BAGUS`
       } else if (goldImpact === 'JELEK') {
-        calendarText += `    ✅ Actual: ${actual} | Forecast: ${forecast}\n`
-        calendarText += `    🔴 NEWS JELEK UNTUK GOLD\n`
-      } else {
-        calendarText += `    ✅ Actual: ${actual} | Forecast: ${forecast} | Prev: ${previous}\n`
+        calendarText += ` 🔴 JELEK`
       }
-    } else if (forecast !== '-' || previous !== '-') {
-      calendarText += `    📈 Forecast: ${forecast} | Prev: ${previous}\n`
+    } else if (forecast !== '-') {
+      calendarText += ` F:${forecast}`
     }
     
-    if (index < events.length - 1) {
-      calendarText += '\n'
-    }
+    calendarText += '\n'
   })
-  
-  calendarText += '\n━━━━━━━━━━━━━━━━━━━━\n'
-  calendarText += '⚠️ High Impact | Auto-hide after 3hrs'
   
   return calendarText
 }
@@ -644,7 +687,7 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
   if (!xauUsdPrice) {
     return {
       status: 'DATA_INCOMPLETE',
-      message: '⚠️ Data XAU/USD tidak tersedia'
+      message: '⚠️ Data Incomplete'
     }
   }
   
@@ -653,23 +696,20 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
   
   let status = 'NORMAL'
   let emoji = '✅'
-  let message = ''
+  let message = 'NORMAL'
   
   if (Math.abs(difference) <= NORMAL_LOW_THRESHOLD) {
     status = 'NORMAL'
     emoji = '✅'
-    message = `NORMAL`
+    message = 'NORMAL'
   } else if (Math.abs(difference) <= NORMAL_THRESHOLD) {
     status = 'NORMAL'
     emoji = '✅'
-    message = `NORMAL`
+    message = 'NORMAL'
   } else {
     status = 'ABNORMAL'
     emoji = '❌'
-    const selisihText = difference > 0 
-      ? `+Rp${formatRupiah(Math.round(Math.abs(difference)))}` 
-      : `-Rp${formatRupiah(Math.round(Math.abs(difference)))}`
-    message = `ABNORMAL (Selisih: ${selisihText})`
+    message = 'ABNORMAL'
   }
   
   return {
@@ -688,7 +728,10 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
   const spread = sell - buy
   const spreadPercent = ((spread / buy) * 100).toFixed(2)
   
-  const updatedAt = treasuryData?.data?.updated_at
+  const buyFormatted = `Rp${formatRupiah(buy)}/gr`
+  const sellFormatted = `Rp${formatRupiah(sell)}/gr`
+  
+const updatedAt = treasuryData?.data?.updated_at
   let timeSection = ''
   if (updatedAt) {
     const date = new Date(updatedAt)
@@ -697,33 +740,28 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
     const hours = date.getHours().toString().padStart(2, '0')
     const minutes = date.getMinutes().toString().padStart(2, '0')
     const seconds = date.getSeconds().toString().padStart(2, '0')
-    timeSection = `🕐 Update: ${dayName}, ${hours}:${minutes}:${seconds} WIB\n`
+    timeSection = `${dayName} ${hours}:${minutes}:${seconds} WIB`
   }
   
   let headerSection = ''
   if (priceChange && priceChange.buyChange !== 0) {
     if (priceChange.buyChange > 0) {
-      headerSection = 'HARGA NAIK 🚀\n'
+      headerSection = '🚀 🚀 NAIK 🚀 🚀\n'
     } else {
-      headerSection = 'HARGA TURUN 🔻\n'
+      headerSection = '🔻 🔻 TURUN 🔻 🔻\n'
     }
   }
   
   let statusSection = ''
   if (xauUsdPrice && usdIdrRate) {
     const analysis = analyzePriceStatus(buy, sell, xauUsdPrice, usdIdrRate)
-    statusSection = `${analysis.emoji} ${analysis.message}\n`
+    statusSection = `${analysis.emoji} ${analysis.message}`
   }
   
-const buyFormatted = `Rp${formatRupiah(buy)}/gr`
-  const sellFormatted = `Rp${formatRupiah(sell)}/gr`
-  const spreadFormatted = `Rp${formatRupiah(Math.abs(spread))} (-${spreadPercent}%)`
-  
-  let marketSection = '💱 Kurs & Pasar\n'
-  marketSection += `💵 USD/IDR: Rp${formatRupiah(Math.round(usdIdrRate))}\n`
+  let marketSection = `💱 USD Rp${formatRupiah(Math.round(usdIdrRate))}`
   
   if (xauUsdPrice) {
-    marketSection += `💰 XAU/USD: $${xauUsdPrice.toFixed(2)}/oz`
+    marketSection += ` | XAU $${xauUsdPrice.toFixed(2)}`
   }
   
   const calendarSection = formatEconomicCalendar(economicEvents)
@@ -733,23 +771,23 @@ const buyFormatted = `Rp${formatRupiah(buy)}/gr`
   const grams30M = calculateProfit(buy, sell, 30000000).totalGrams
   const profit30M = calculateProfit(buy, sell, 30000000).profit
   
-  const formatGrams = (g) => {
-    const formatted = g.toFixed(4)
-    return formatted.replace(/\.?0+$/, '')
+  // Format gram dengan 4 digit desimal
+  const formatGrams = (g) => g.toFixed(4)
+  
+  // Format profit dalam juta (1.23jt format)
+  const formatProfitShort = (p) => {
+    const millions = p / 1000000
+    return millions.toFixed(2)
   }
   
-  return `${headerSection}${timeSection}${statusSection}
-📊 Harga Beli: ${buyFormatted}
-📉 Harga Jual: ${sellFormatted}
-💬 Selisih: ${spreadFormatted}
+  return `${headerSection}${timeSection} | ${statusSection}
 
+💰 Beli ${buyFormatted} | Jual ${sellFormatted} (${spreadPercent > 0 ? '-' : ''}${spreadPercent}%)
 ${marketSection}
 
-🎁 Promo
-💰 Rp20 Juta ➜ ${formatGrams(grams20M)} gr | Profit: +Rp${formatRupiah(Math.round(profit20M))} 🚀
-💰 Rp30 Juta ➜ ${formatGrams(grams30M)} gr | Profit: +Rp${formatRupiah(Math.round(profit30M))} 🚀${calendarSection}
-
-⚡ Harga diperbarui otomatis`
+🎁 20jt→${formatGrams(grams20M)}gr (+${formatProfitShort(profit20M)}jt) | 30jt→${formatGrams(grams30M)}gr (+${formatProfitShort(profit30M)}jt)
+${calendarSection}
+⚡ Auto-update`
 }
 
 async function fetchTreasury() {
@@ -817,18 +855,18 @@ async function doBroadcast(priceChange, priceData) {
       }
     }
     
-    pushLog(`📤 [#${currentBroadcastId}] Starting broadcast...`)
+    const startTime = Date.now()
+    pushLog(`📤 [#${currentBroadcastId}] Starting instant broadcast...`)
     
-    // Fetch market data PARALLEL (tapi treasury sudah ada dari priceData)
-    const [usdIdr, xauUsd, economicEvents] = await Promise.all([
-      fetchUSDIDRFromGoogle(),
-      fetchXAUUSDCached(),
-      fetchEconomicCalendar()
-    ])
+    // ⚡ INSTANT: Gunakan cached market data (sudah pre-fetched)
+    const usdIdr = cachedMarketData.usdIdr
+    const xauUsd = cachedMarketData.xauUsd
+    const economicEvents = cachedMarketData.economicEvents
     
     // Check lagi sebelum broadcast (double safety)
     if (!sock || !isReady) {
       pushLog(`⚠️  Bot not ready, aborting broadcast #${currentBroadcastId}`)
+      isBroadcasting = false
       return
     }
     
@@ -843,38 +881,35 @@ async function doBroadcast(priceChange, priceData) {
     
     const message = formatMessage(treasuryData, usdIdr.rate, xauUsd, priceChange, economicEvents)
     
-    pushLog(`📤 [#${currentBroadcastId}] Broadcasting to ${subscriptions.size} subs`)
+    const prepTime = Date.now() - startTime
+    pushLog(`📤 [#${currentBroadcastId}] Message ready (${prepTime}ms), sending to ${subscriptions.size} subs...`)
     
     let successCount = 0
     let failCount = 0
     
     const subsArray = Array.from(subscriptions)
     
-    // Batch sending untuk avoid rate limit
-    for (let i = 0; i < subsArray.length; i += BATCH_SIZE) {
-      const batch = subsArray.slice(i, i + BATCH_SIZE)
-      
-      // Send batch PARALLEL - NO DELAY!
-      const sendPromises = batch.map(chatId => 
-        sock.sendMessage(chatId, { text: message })
-          .then(() => {
-            successCount++
-          })
-          .catch((e) => {
-            failCount++
-            pushLog(`❌ Failed: ${chatId.substring(0, 15)}`)
-          })
-      )
-      
-      await Promise.allSettled(sendPromises)
-      
-      // Delay hanya antar batch (jika ada batch berikutnya)
-      if (i + BATCH_SIZE < subsArray.length) {
-        await new Promise(r => setTimeout(r, BATCH_DELAY))
-      }
-    }
+    // ⚡ INSTANT SEND: Fire all messages at once with Promise.allSettled
+    const sendStartTime = Date.now()
     
-    pushLog(`✅ [#${currentBroadcastId}] Sent: ${successCount}, Failed: ${failCount}`)
+    const sendPromises = subsArray.map(chatId => 
+      sock.sendMessage(chatId, { text: message })
+        .then(() => {
+          successCount++
+        })
+        .catch((e) => {
+          failCount++
+          pushLog(`❌ Failed: ${chatId.substring(0, 15)}`)
+        })
+    )
+    
+    // Wait for all to complete
+    await Promise.allSettled(sendPromises)
+    
+    const sendTime = Date.now() - sendStartTime
+    const totalTime = Date.now() - startTime
+    
+    pushLog(`✅ [#${currentBroadcastId}] Sent: ${successCount}, Failed: ${failCount} (send: ${sendTime}ms, total: ${totalTime}ms)`)
     
   } catch (e) {
     pushLog(`❌ Broadcast #${currentBroadcastId} error: ${e.message}`)
@@ -893,12 +928,13 @@ async function checkPriceUpdate() {
       buy: treasuryData?.data?.buying_rate,
       sell: treasuryData?.data?.selling_rate,
       updated_at: treasuryData?.data?.updated_at,
-      fetchedAt: Date.now() // ✅ TAMBAHKAN TIMESTAMP FETCH
+      fetchedAt: Date.now()
     }
 
     if (!lastKnownPrice) {
       lastKnownPrice = currentPrice
       lastBroadcastedPrice = currentPrice
+      lastPriceUpdateTime = Date.now()
       pushLog(`📊 Initial: Buy=${formatRupiah(currentPrice.buy)}, Sell=${formatRupiah(currentPrice.sell)}`)
       return
     }
@@ -906,17 +942,33 @@ async function checkPriceUpdate() {
     const buyChanged = lastKnownPrice.buy !== currentPrice.buy
     const sellChanged = lastKnownPrice.sell !== currentPrice.sell
     
-    if (!buyChanged && !sellChanged) return
+    // ⏱️ STALE PRICE DETECTION
+    const now = Date.now()
+    const timeSinceLastUpdate = now - lastPriceUpdateTime
+    const isPriceStale = timeSinceLastUpdate >= STALE_PRICE_THRESHOLD
     
+    if (!buyChanged && !sellChanged) {
+      // Tidak ada perubahan harga
+      if (isPriceStale) {
+        // Log setiap menit jika harga stale
+        const minutes = Math.floor(timeSinceLastUpdate / 60000)
+        if (minutes % 1 === 0) {
+          pushLog(`⏱️  Harga tidak berubah selama ${minutes} menit`)
+        }
+      }
+      return
+    }
+    
+    // 🔥 ADA PERUBAHAN HARGA!
     const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
     const sellChangeSinceBroadcast = Math.abs(currentPrice.sell - (lastBroadcastedPrice?.sell || currentPrice.sell))
     
     if (buyChangeSinceBroadcast < MIN_PRICE_CHANGE && sellChangeSinceBroadcast < MIN_PRICE_CHANGE) {
       lastKnownPrice = currentPrice
+      lastPriceUpdateTime = now  // Update timestamp meskipun perubahan kecil
       return
     }
     
-    const now = Date.now()
     const timeSinceLastBroadcast = now - lastBroadcastTime
     
     // Cek apakah sudah ganti menit
@@ -926,16 +978,22 @@ async function checkPriceUpdate() {
     const currentMinute = currentDate.getHours() * 60 + currentDate.getMinutes()
     const isNewMinute = currentMinute !== lastMinute
     
-    // Jangan broadcast jika:
-    // 1. Belum 50 detik DAN
-    // 2. Masih di menit yang sama
-    if (timeSinceLastBroadcast < BROADCAST_COOLDOWN && !isNewMinute) {
+    // 🎯 LOGIKA BROADCAST:
+    // 1. Jika harga stale (5+ menit tidak update) → BROADCAST LANGSUNG saat ada update baru
+    // 2. Jika harga tidak stale → ikuti cooldown normal (50 detik ATAU ganti menit)
+    
+    const shouldBroadcast = isPriceStale 
+      ? true  // Langsung broadcast jika harga baru setelah 5 menit stale
+      : (timeSinceLastBroadcast >= BROADCAST_COOLDOWN || isNewMinute)
+    
+    if (!shouldBroadcast) {
       const priceChange = {
         buyChange: currentPrice.buy - lastKnownPrice.buy,
         sellChange: currentPrice.sell - lastKnownPrice.sell
       }
       
       lastKnownPrice = currentPrice
+      lastPriceUpdateTime = now  // Update timestamp
       
       const time = new Date().toISOString().substring(11, 19)
       const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
@@ -951,12 +1009,21 @@ async function checkPriceUpdate() {
     }
     
     lastKnownPrice = currentPrice
+    lastPriceUpdateTime = now  // Update timestamp saat broadcast
     
     const time = new Date().toISOString().substring(11, 19)
     const buyIcon = priceChange.buyChange > 0 ? '📈' : '📉'
     const sellIcon = priceChange.sellChange > 0 ? '📈' : '📉'
     
-    const reason = isNewMinute ? '(New minute)' : '(50s passed)'
+    let reason = ''
+    if (isPriceStale) {
+      reason = `(🎯 Update setelah ${Math.floor(timeSinceLastUpdate/60000)}m stale)`
+    } else if (isNewMinute) {
+      reason = '(New minute)'
+    } else {
+      reason = '(50s passed)'
+    }
+    
     pushLog(`🔔 ${time} PRICE CHANGE! ${buyIcon} Buy: ${priceChange.buyChange > 0 ? '+' : ''}${formatRupiah(priceChange.buyChange)} ${sellIcon} Sell: ${priceChange.sellChange > 0 ? '+' : ''}${formatRupiah(priceChange.sellChange)} ${reason}`)
     
     // CRITICAL FIX: Hitung finalPriceChange SEBELUM update lastBroadcastedPrice
@@ -971,7 +1038,7 @@ async function checkPriceUpdate() {
     const priceMinute = priceFetchTime.getHours() * 60 + priceFetchTime.getMinutes()
     const nowMinute = nowTime.getHours() * 60 + nowTime.getMinutes()
     
-    if (priceMinute !== nowMinute) {
+    if (priceMinute !== nowMinute && !isPriceStale) {
       pushLog(`⚠️  Price dari menit lain (${priceMinute} vs ${nowMinute}), skip broadcast`)
       lastBroadcastedPrice = {
         buy: currentPrice.buy,
@@ -1001,9 +1068,10 @@ async function checkPriceUpdate() {
 
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 
-console.log(`✅ Broadcast: 50s cooldown OR new minute`)
+console.log(`✅ Broadcast: 50s cooldown OR new minute OR stale price (5m+)`)
 console.log(`📊 Price check: every ${PRICE_CHECK_INTERVAL/1000}s (ULTRA REAL-TIME!)`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
+console.log(`⏱️  Stale price threshold: ${STALE_PRICE_THRESHOLD/60000} minutes`)
 console.log(`🔧 XAU/USD cache: ${XAU_CACHE_DURATION/1000}s`)
 console.log(`📅 Economic calendar: USD High-Impact (auto-hide 3hrs, WIB)`)
 console.log(`⚡ Batch size: ${BATCH_SIZE} messages`)
@@ -1043,6 +1111,10 @@ app.get('/qr', async (_req, res) => {
 })
 
 app.get('/stats', (_req, res) => {
+  const now = Date.now()
+  const timeSinceLastUpdate = lastPriceUpdateTime > 0 ? now - lastPriceUpdateTime : null
+  const isPriceStale = timeSinceLastUpdate ? timeSinceLastUpdate >= STALE_PRICE_THRESHOLD : false
+  
   res.json({
     status: isReady ? '🟢' : '🔴',
     uptime: Math.floor(process.uptime()),
@@ -1051,7 +1123,11 @@ app.get('/stats', (_req, res) => {
     lastBroadcasted: lastBroadcastedPrice,
     broadcastCount: broadcastCount,
     lastBroadcastTime: lastBroadcastTime > 0 ? new Date(lastBroadcastTime).toISOString() : null,
-    timeSinceLastBroadcast: lastBroadcastTime > 0 ? Math.floor((Date.now() - lastBroadcastTime) / 1000) : null,
+    timeSinceLastBroadcast: lastBroadcastTime > 0 ? Math.floor((now - lastBroadcastTime) / 1000) : null,
+    lastPriceUpdateTime: lastPriceUpdateTime > 0 ? new Date(lastPriceUpdateTime).toISOString() : null,
+    timeSinceLastPriceUpdate: timeSinceLastUpdate ? Math.floor(timeSinceLastUpdate / 1000) : null,
+    isPriceStale: isPriceStale,
+    staleThreshold: STALE_PRICE_THRESHOLD / 60000,
     cachedXAUUSD: cachedXAUUSD,
     cachedEconomicEvents: cachedEconomicEvents,
     wsConnected: sock?.ws?.readyState === 1,
