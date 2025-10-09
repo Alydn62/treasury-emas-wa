@@ -731,7 +731,7 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
   const buyFormatted = `Rp${formatRupiah(buy)}/gr`
   const sellFormatted = `Rp${formatRupiah(sell)}/gr`
   
-const updatedAt = treasuryData?.data?.updated_at
+  const updatedAt = treasuryData?.data?.updated_at
   let timeSection = ''
   if (updatedAt) {
     const date = new Date(updatedAt)
@@ -774,18 +774,12 @@ const updatedAt = treasuryData?.data?.updated_at
   // Format gram dengan 4 digit desimal
   const formatGrams = (g) => g.toFixed(4)
   
-  // Format profit dalam juta (1.23jt format)
-  const formatProfitShort = (p) => {
-    const millions = p / 1000000
-    return millions.toFixed(2)
-  }
-  
   return `${headerSection}${timeSection} | ${statusSection}
 
 💰 Beli ${buyFormatted} | Jual ${sellFormatted} (${spreadPercent > 0 ? '-' : ''}${spreadPercent}%)
 ${marketSection}
 
-🎁 20jt→${formatGrams(grams20M)}gr (+${formatProfitShort(profit20M)}jt) | 30jt→${formatGrams(grams30M)}gr (+${formatProfitShort(profit30M)}jt)
+🎁 20jt→${formatGrams(grams20M)}gr (+Rp${formatRupiah(Math.round(profit20M))}) | 30jt→${formatGrams(grams30M)}gr (+Rp${formatRupiah(Math.round(profit30M))})
 ${calendarSection}
 ⚡ Auto-update`
 }
