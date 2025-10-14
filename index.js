@@ -755,7 +755,16 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
   let statusSection = ''
   if (xauUsdPrice && usdIdrRate) {
     const analysis = analyzePriceStatus(buy, sell, xauUsdPrice, usdIdrRate)
-    statusSection = `${analysis.emoji} ${analysis.message}`
+    
+    // ✅ TAMBAHKAN SELISIH UNTUK ABNORMAL
+    if (analysis.status === 'ABNORMAL') {
+      const diffFormatted = analysis.difference >= 0 
+        ? `+Rp${formatRupiah(Math.round(Math.abs(analysis.difference)))}` 
+        : `-Rp${formatRupiah(Math.round(Math.abs(analysis.difference)))}`
+      statusSection = `${analysis.emoji} ${analysis.message} = ${diffFormatted}`
+    } else {
+      statusSection = `${analysis.emoji} ${analysis.message}`
+    }
   }
   
   let marketSection = `💱 USD Rp${formatRupiah(Math.round(usdIdrRate))}`
@@ -783,7 +792,6 @@ ${marketSection}
 ${calendarSection}
 ⚡ Auto-update`
 }
-
 async function fetchTreasury() {
   const res = await fetch(TREASURY_URL, {
     method: 'POST',
