@@ -422,7 +422,7 @@ function formatEconomicCalendar(events) {
     return ''
   }
 
-  let calendarText = '\n╟───────────────────────────────╢\n║ 📅 USD ECONOMIC NEWS          ║\n╟───────────────────────────────╢\n'
+  let calendarText = '\n📅 USD News\n'
   
   events.forEach((event, index) => {
     const eventDate = new Date(event.date)
@@ -484,14 +484,13 @@ function formatEconomicCalendar(events) {
     else if (title.includes('Retail')) shortTitle = 'Retail'
     else if (title.includes('Jobless')) shortTitle = 'Jobless'
     
-    // Fancy format dengan border
-    calendarText += `║ • ${dayName} ${timeStr}`
+    calendarText += `• ${dayName} ${timeStr}`
 
     if (timeStatus) {
-      calendarText += ` ${timeStatus}`
+      calendarText += ` (${timeStatus})`
     }
 
-    calendarText += ` · ${shortTitle}`
+    calendarText += ` ${shortTitle}`
 
     if (actual !== '-' && actual !== '') {
       const goldImpact = analyzeGoldImpact(event)
@@ -499,37 +498,27 @@ function formatEconomicCalendar(events) {
       calendarText += ` ${actual}>${forecast}`
 
       if (goldImpact) {
-        // Icon minimal dan modern
-        const impactSymbol = goldImpact.impact === 'BAGUS' ? '↑' : '↓'
-        const recSymbol = goldImpact.recommendation === 'BUY' ? '▲' :
-                          goldImpact.recommendation === 'SELL' ? '▼' : '─'
+        const impactEmoji = goldImpact.impact === 'BAGUS' ? '🟢' : '🔴'
+        const recEmoji = goldImpact.recommendation === 'BUY' ? '📈' :
+                         goldImpact.recommendation === 'SELL' ? '📉' : '⏸️'
 
-        calendarText += ` ${impactSymbol}${goldImpact.impact}`
+        calendarText += ` ${impactEmoji}${goldImpact.impact}`
 
-        // Tampilkan strength dengan format minimal
         if (goldImpact.strength !== 'LEMAH') {
-          const strengthText = goldImpact.strength === 'SANGAT KUAT' ? '***' :
-                               goldImpact.strength === 'KUAT' ? '**' : '*'
-          calendarText += `${strengthText}`
+          calendarText += ` ${goldImpact.strengthEmoji}`
         }
 
-        // Tampilkan recommendation
-        calendarText += ` ${recSymbol}${goldImpact.recommendation}`
-      }
+        calendarText += ` ${recEmoji}${goldImpact.recommendation}`
 
-      // Close border untuk baris pertama
-      calendarText += '║\n'
-
-      // Tampilkan reasoning di baris baru dengan indent dan border
-      if (goldImpact && goldImpact.reasoning) {
-        const reasoningPadded = goldImpact.reasoning.padEnd(27)
-        calendarText += `║   → ${reasoningPadded}║\n`
+        if (goldImpact.reasoning) {
+          calendarText += `\n  ↳ ${goldImpact.reasoning}`
+        }
       }
     } else if (forecast !== '-') {
-      calendarText += ` [Est: ${forecast}]║\n`
-    } else {
-      calendarText += '║\n'
+      calendarText += ` F:${forecast}`
     }
+
+    calendarText += '\n'
   })
   
   return calendarText
@@ -837,8 +826,8 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
   const spread = sell - buy
   const spreadPercent = ((spread / buy) * 100).toFixed(2)
 
-  const buyFormatted = `Rp${formatRupiah(buy)}`
-  const sellFormatted = `Rp${formatRupiah(sell)}`
+  const buyFormatted = `Rp${formatRupiah(buy)}/gr`
+  const sellFormatted = `Rp${formatRupiah(sell)}/gr`
 
   const updatedAt = treasuryData?.data?.updated_at
   let timeSection = ''
@@ -849,39 +838,38 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
     const hours = date.getHours().toString().padStart(2, '0')
     const minutes = date.getMinutes().toString().padStart(2, '0')
     const seconds = date.getSeconds().toString().padStart(2, '0')
-    timeSection = `${dayName} ${hours}:${minutes}:${seconds}`
+
+    // Format jam digital dengan box
+    timeSection = `⏰ ${dayName} ${hours}:${minutes}:${seconds}`
   }
 
-  // Fancy header dengan trend indicator
   let headerSection = ''
   if (priceChange && priceChange.buyChange !== 0) {
-    const changeAmount = Math.abs(priceChange.buyChange)
     if (priceChange.buyChange > 0) {
-      headerSection = `╔═══════════════════════════════╗
-║ ▲ BULLISH +${formatRupiah(changeAmount).padEnd(18)} ║
-╚═══════════════════════════════╝
-`
+      headerSection = '🚀 🚀 NAIK 🚀 🚀\n'
     } else {
-      headerSection = `╔═══════════════════════════════╗
-║ ▼ BEARISH -${formatRupiah(changeAmount).padEnd(18)} ║
-╚═══════════════════════════════╝
-`
+      headerSection = '🔻 🔻 TURUN 🔻 🔻\n'
     }
   }
 
-  // Status section dengan fancy border
-  let statusLine = ''
+  let statusSection = ''
   if (xauUsdPrice && usdIdrRate) {
     const analysis = analyzePriceStatus(buy, sell, xauUsdPrice, usdIdrRate)
 
     if (analysis.status === 'ABNORMAL') {
       const diffFormatted = analysis.difference >= 0
-        ? `+${formatRupiah(Math.round(Math.abs(analysis.difference)))}`
-        : `-${formatRupiah(Math.round(Math.abs(analysis.difference)))}`
-      statusLine = `║ Status: ${analysis.message} ${diffFormatted}`
+        ? `+Rp${formatRupiah(Math.round(Math.abs(analysis.difference)))}`
+        : `-Rp${formatRupiah(Math.round(Math.abs(analysis.difference)))}`
+      statusSection = `${analysis.emoji} ${analysis.message} = ${diffFormatted}`
     } else {
-      statusLine = `║ Status: ${analysis.message}`
+      statusSection = `${analysis.emoji} ${analysis.message}`
     }
+  }
+
+  let marketSection = `💱 USD Rp${formatRupiah(Math.round(usdIdrRate))}`
+
+  if (xauUsdPrice) {
+    marketSection += ` | XAU $${xauUsdPrice.toFixed(2)}`
   }
 
   const calendarSection = formatEconomicCalendar(economicEvents)
@@ -891,31 +879,15 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
   const grams30M = calculateProfit(buy, sell, 30000000).totalGrams
   const profit30M = calculateProfit(buy, sell, 30000000).profit
 
-  // Format gram dengan 4 digit desimal
   const formatGrams = (g) => g.toFixed(4)
 
-  // Fancy Unicode Box Layout
-  return `${headerSection}╔═══════════════════════════════╗
-║  TREASURY GOLD PRICE          ║
-╠═══════════════════════════════╣
-║ 🕐 ${timeSection.padEnd(26)}║
-${statusLine ? statusLine.padEnd(34) + '║' : ''}${statusLine ? '\n' : ''}╟───────────────────────────────╢
-║ 💰 RATES (per gram)           ║
-║ • Buy:  ${buyFormatted.padEnd(21)}║
-║ • Sell: ${sellFormatted.padEnd(21)}║
-║ • Spread: ${(spreadPercent + '%').padEnd(19)}║
-╟───────────────────────────────╢
-║ 🌍 MARKET DATA                ║
-║ • USD/IDR: Rp${formatRupiah(Math.round(usdIdrRate)).padEnd(16)}║
-║ • XAU/USD: $${xauUsdPrice ? xauUsdPrice.toFixed(2).padEnd(17) : 'N/A'.padEnd(17)}║
-╟───────────────────────────────╢
-║ 📊 INVESTMENT CALCULATOR      ║
-║ • 20M → ${formatGrams(grams20M)}g           ║
-║   Profit: +Rp${formatRupiah(Math.round(profit20M)).padEnd(15)}║
-║ • 30M → ${formatGrams(grams30M)}g           ║
-║   Profit: +Rp${formatRupiah(Math.round(profit30M)).padEnd(15)}║
-${calendarSection}╚═══════════════════════════════╝
-⚡ Auto-updated`
+  return `${headerSection}${timeSection} | ${statusSection}
+
+💰 Beli ${buyFormatted} | Jual ${sellFormatted} (${spreadPercent > 0 ? '-' : ''}${spreadPercent}%)
+${marketSection}
+
+🎁 20jt→${formatGrams(grams20M)}gr (+Rp${formatRupiah(Math.round(profit20M))}) | 30jt→${formatGrams(grams30M)}gr (+Rp${formatRupiah(Math.round(profit30M))})
+${calendarSection}⚡ Auto-update`
 }
 async function fetchTreasury() {
   const res = await fetch(TREASURY_URL, {
@@ -1414,45 +1386,17 @@ async function start() {
 
         const sendTarget = msg.key.remoteJid
         
-        if (/\blangganan\b|\bsubscribe\b/.test(text)) {
+        if (/\bmulai\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: `╔═══════════════════════════════╗
-║  SUBSCRIPTION STATUS          ║
-╠═══════════════════════════════╣
-║ ✅ Already subscribed         ║
-╟───────────────────────────────╢
-║ ACTIVE FEATURES:              ║
-║ • Real-time price alerts      ║
-║ • Auto-broadcast on changes   ║
-║ • USD economic calendar       ║
-║ • Investment calculator       ║
-║ • Gold impact analysis        ║
-╟───────────────────────────────╢
-║ Type "berhenti" to stop       ║
-╚═══════════════════════════════╝`
+              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD (auto-hide 3 jam)\n⚡ Ultra real-time (1 detik check interval)'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`➕ New sub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
 
             await sock.sendMessage(sendTarget, {
-              text: `╔═══════════════════════════════╗
-║  SUBSCRIPTION ACTIVE          ║
-╠═══════════════════════════════╣
-║ 🎉 Successfully subscribed!   ║
-╟───────────────────────────────╢
-║ YOU WILL RECEIVE:             ║
-║ • Real-time gold prices       ║
-║ • Auto-broadcast on changes   ║
-║ • USD economic calendar       ║
-║ • BUY/SELL recommendations    ║
-║ • Investment profit calc      ║
-╟───────────────────────────────╢
-║ Commands:                     ║
-║ • "emas" - Check price        ║
-║ • "berhenti" - Unsubscribe    ║
-╚═══════════════════════════════╝`
+              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD high-impact (auto-hide 3 jam)\n⚡ Ultra real-time (1 detik check interval)\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
@@ -1462,27 +1406,9 @@ async function start() {
           if (subscriptions.has(sendTarget)) {
             subscriptions.delete(sendTarget)
             pushLog(`➖ Unsub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
-            await sock.sendMessage(sendTarget, {
-              text: `╔═══════════════════════════════╗
-║  UNSUBSCRIBED                 ║
-╠═══════════════════════════════╣
-║ 👋 Subscription cancelled     ║
-║                               ║
-║ Type "langganan" to           ║
-║ re-subscribe anytime          ║
-╚═══════════════════════════════╝`
-            }, { quoted: msg })
+            await sock.sendMessage(sendTarget, { text: '👋 Langganan dihentikan.' }, { quoted: msg })
           } else {
-            await sock.sendMessage(sendTarget, {
-              text: `╔═══════════════════════════════╗
-║  ERROR                        ║
-╠═══════════════════════════════╣
-║ ❌ Not subscribed yet         ║
-║                               ║
-║ Type "langganan" to           ║
-║ start subscription            ║
-╚═══════════════════════════════╝`
-            }, { quoted: msg })
+            await sock.sendMessage(sendTarget, { text: '❌ Belum berlangganan.' }, { quoted: msg })
           }
           continue
         }
