@@ -244,8 +244,7 @@ async function fetchEconomicCalendar() {
       if (!CALENDAR_COUNTRY_FILTER.includes(event.country)) return false
       
       // Filter: hanya High Impact
-      const impactValue = event.impact === 'High' || event.importance === 3
-      if (!impactValue) return false
+      if (event.impact !== 'High') return false
       
       return true
     })
@@ -273,155 +272,69 @@ async function fetchEconomicCalendar() {
   }
 }
 
-// Fungsi untuk menentukan apakah news bagus/jelek untuk gold dengan analisis lengkap
+// Fungsi untuk menentukan apakah news bagus/jelek untuk gold
 function analyzeGoldImpact(event) {
   const title = (event.title || '').toLowerCase()
   const actual = event.actual || ''
   const forecast = event.forecast || ''
-  const previous = event.previous || ''
-
+  
   if (!actual || actual === '-' || !forecast || forecast === '-') {
     return null
   }
-
+  
   const actualNum = parseFloat(actual.replace(/[^0-9.-]/g, ''))
   const forecastNum = parseFloat(forecast.replace(/[^0-9.-]/g, ''))
-  const previousNum = previous && previous !== '-' ? parseFloat(previous.replace(/[^0-9.-]/g, '')) : null
-
+  
   if (isNaN(actualNum) || isNaN(forecastNum)) {
     return null
   }
-
-  // Hitung persentase deviasi dari forecast
-  const deviation = ((actualNum - forecastNum) / Math.abs(forecastNum)) * 100
-  const absDeviation = Math.abs(deviation)
-
-  // Tentukan strength berdasarkan deviasi
-  let strength = 'LEMAH'
-  let strengthEmoji = '●'
-  if (absDeviation > 20) {
-    strength = 'SANGAT KUAT'
-    strengthEmoji = '●●●'
-  } else if (absDeviation > 10) {
-    strength = 'KUAT'
-    strengthEmoji = '●●'
-  }
-
+  
   // Logic: news yang memperkuat USD = jelek untuk gold
   // news yang melemahkan USD = bagus untuk gold
-
-  let result = null
-  let reasoning = ''
-  let recommendation = 'HOLD'
-
+  
   // Interest Rate: Naik = USD kuat = jelek untuk gold
   if (title.includes('interest rate') || title.includes('fed') || title.includes('fomc')) {
-    if (actualNum > forecastNum) {
-      result = 'JELEK'
-      reasoning = 'Suku bunga naik → USD menguat'
-      recommendation = absDeviation > 10 ? 'SELL' : 'HOLD'
-    } else {
-      result = 'BAGUS'
-      reasoning = 'Suku bunga turun → USD melemah'
-      recommendation = absDeviation > 10 ? 'BUY' : 'HOLD'
-    }
+    return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
   }
-
+  
   // NFP / Employment: Naik = ekonomi kuat = USD kuat = jelek untuk gold
-  else if (title.includes('non-farm') || title.includes('nfp') || title.includes('payroll')) {
-    if (actualNum > forecastNum) {
-      result = 'JELEK'
-      reasoning = 'Lapangan kerja naik → Ekonomi kuat → USD menguat'
-      recommendation = absDeviation > 15 ? 'SELL' : 'HOLD'
-    } else {
-      result = 'BAGUS'
-      reasoning = 'Lapangan kerja turun → Ekonomi lemah → USD melemah'
-      recommendation = absDeviation > 15 ? 'BUY' : 'HOLD'
-    }
+  if (title.includes('non-farm') || title.includes('nfp') || title.includes('payroll')) {
+    return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
   }
-
+  
   // Unemployment: Naik = ekonomi lemah = USD lemah = bagus untuk gold
-  else if (title.includes('unemployment')) {
-    if (actualNum > forecastNum) {
-      result = 'BAGUS'
-      reasoning = 'Pengangguran naik → Ekonomi lemah → USD melemah'
-      recommendation = absDeviation > 10 ? 'BUY' : 'HOLD'
-    } else {
-      result = 'JELEK'
-      reasoning = 'Pengangguran turun → Ekonomi kuat → USD menguat'
-      recommendation = absDeviation > 10 ? 'SELL' : 'HOLD'
-    }
+  if (title.includes('unemployment')) {
+    return actualNum > forecastNum ? 'BAGUS' : 'JELEK'
   }
-
-  // CPI / Inflation: Naik = inflasi tinggi = bagus untuk gold (safe haven)
-  else if (title.includes('cpi') || title.includes('inflation') || title.includes('pce')) {
-    if (actualNum > forecastNum) {
-      result = 'BAGUS'
-      reasoning = 'Inflasi naik → Emas sebagai pelindung inflasi'
-      recommendation = absDeviation > 5 ? 'BUY' : 'HOLD'
-    } else {
-      result = 'JELEK'
-      reasoning = 'Inflasi turun → Tekanan ke emas berkurang'
-      recommendation = absDeviation > 5 ? 'SELL' : 'HOLD'
-    }
+  
+  // CPI / Inflation: Naik = inflasi tinggi = bagus untuk gold
+  if (title.includes('cpi') || title.includes('inflation') || title.includes('pce')) {
+    return actualNum > forecastNum ? 'BAGUS' : 'JELEK'
   }
-
+  
   // GDP: Naik = ekonomi kuat = USD kuat = jelek untuk gold
-  else if (title.includes('gdp')) {
-    if (actualNum > forecastNum) {
-      result = 'JELEK'
-      reasoning = 'GDP naik → Ekonomi kuat → USD menguat'
-      recommendation = absDeviation > 8 ? 'SELL' : 'HOLD'
-    } else {
-      result = 'BAGUS'
-      reasoning = 'GDP turun → Ekonomi lemah → USD melemah'
-      recommendation = absDeviation > 8 ? 'BUY' : 'HOLD'
-    }
+  if (title.includes('gdp')) {
+    return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
   }
-
+  
   // Jobless Claims: Naik = ekonomi lemah = bagus untuk gold
-  else if (title.includes('jobless') || title.includes('claims')) {
-    if (actualNum > forecastNum) {
-      result = 'BAGUS'
-      reasoning = 'Klaim pengangguran naik → Ekonomi lemah'
-      recommendation = absDeviation > 10 ? 'BUY' : 'HOLD'
-    } else {
-      result = 'JELEK'
-      reasoning = 'Klaim pengangguran turun → Ekonomi kuat'
-      recommendation = absDeviation > 10 ? 'SELL' : 'HOLD'
-    }
+  if (title.includes('jobless') || title.includes('claims')) {
+    return actualNum > forecastNum ? 'BAGUS' : 'JELEK'
   }
-
+  
   // Retail Sales: Naik = ekonomi kuat = jelek untuk gold
-  else if (title.includes('retail sales')) {
-    if (actualNum > forecastNum) {
-      result = 'JELEK'
-      reasoning = 'Penjualan ritel naik → Ekonomi kuat'
-      recommendation = absDeviation > 12 ? 'SELL' : 'HOLD'
-    } else {
-      result = 'BAGUS'
-      reasoning = 'Penjualan ritel turun → Ekonomi lemah'
-      recommendation = absDeviation > 12 ? 'BUY' : 'HOLD'
-    }
+  if (title.includes('retail sales')) {
+    return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
   }
-
-  if (!result) return null
-
-  return {
-    impact: result,
-    reasoning: reasoning,
-    recommendation: recommendation,
-    strength: strength,
-    strengthEmoji: strengthEmoji,
-    deviation: deviation.toFixed(1)
-  }
+  
+  return null
 }
 
 function formatEconomicCalendar(events) {
   if (!events || events.length === 0) {
     return ''
   }
-
+  
   let calendarText = '\n📅 USD News\n'
   
   events.forEach((event, index) => {
@@ -485,39 +398,27 @@ function formatEconomicCalendar(events) {
     else if (title.includes('Jobless')) shortTitle = 'Jobless'
     
     calendarText += `• ${dayName} ${timeStr}`
-
+    
     if (timeStatus) {
       calendarText += ` (${timeStatus})`
     }
-
+    
     calendarText += ` ${shortTitle}`
-
+    
     if (actual !== '-' && actual !== '') {
       const goldImpact = analyzeGoldImpact(event)
-
+      
       calendarText += ` ${actual}>${forecast}`
-
-      if (goldImpact) {
-        const impactEmoji = goldImpact.impact === 'BAGUS' ? '🟢' : '🔴'
-        const recEmoji = goldImpact.recommendation === 'BUY' ? '📈' :
-                         goldImpact.recommendation === 'SELL' ? '📉' : '⏸️'
-
-        calendarText += ` ${impactEmoji}${goldImpact.impact}`
-
-        if (goldImpact.strength !== 'LEMAH') {
-          calendarText += ` ${goldImpact.strengthEmoji}`
-        }
-
-        calendarText += ` ${recEmoji}${goldImpact.recommendation}`
-
-        if (goldImpact.reasoning) {
-          calendarText += `\n  ↳ ${goldImpact.reasoning}`
-        }
+      
+      if (goldImpact === 'BAGUS') {
+        calendarText += ` 🟢 BAGUS`
+      } else if (goldImpact === 'JELEK') {
+        calendarText += ` 🔴 JELEK`
       }
     } else if (forecast !== '-') {
       calendarText += ` F:${forecast}`
     }
-
+    
     calendarText += '\n'
   })
   
@@ -822,27 +723,25 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
 function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange = null, economicEvents = null) {
   const buy = treasuryData?.data?.buying_rate || 0
   const sell = treasuryData?.data?.selling_rate || 0
-
+  
   const spread = sell - buy
   const spreadPercent = ((spread / buy) * 100).toFixed(2)
-
+  
   const buyFormatted = `Rp${formatRupiah(buy)}/gr`
   const sellFormatted = `Rp${formatRupiah(sell)}/gr`
-
+  
   const updatedAt = treasuryData?.data?.updated_at
   let timeSection = ''
   if (updatedAt) {
     const date = new Date(updatedAt)
-    const days = ['Min', 'Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab']
+    const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
     const dayName = days[date.getDay()]
     const hours = date.getHours().toString().padStart(2, '0')
     const minutes = date.getMinutes().toString().padStart(2, '0')
     const seconds = date.getSeconds().toString().padStart(2, '0')
-
-    // Format jam digital dengan box
-    timeSection = `⏰ ${dayName} ${hours}:${minutes}:${seconds}`
+    timeSection = `${dayName} ${hours}:${minutes}:${seconds} WIB`
   }
-
+  
   let headerSection = ''
   if (priceChange && priceChange.buyChange !== 0) {
     if (priceChange.buyChange > 0) {
@@ -851,43 +750,46 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
       headerSection = '🔻 🔻 TURUN 🔻 🔻\n'
     }
   }
-
+  
   let statusSection = ''
   if (xauUsdPrice && usdIdrRate) {
     const analysis = analyzePriceStatus(buy, sell, xauUsdPrice, usdIdrRate)
-
+    
+    // ✅ TAMBAHKAN SELISIH UNTUK ABNORMAL
     if (analysis.status === 'ABNORMAL') {
-      const diffFormatted = analysis.difference >= 0
-        ? `+Rp${formatRupiah(Math.round(Math.abs(analysis.difference)))}`
+      const diffFormatted = analysis.difference >= 0 
+        ? `+Rp${formatRupiah(Math.round(Math.abs(analysis.difference)))}` 
         : `-Rp${formatRupiah(Math.round(Math.abs(analysis.difference)))}`
       statusSection = `${analysis.emoji} ${analysis.message} = ${diffFormatted}`
     } else {
       statusSection = `${analysis.emoji} ${analysis.message}`
     }
   }
-
+  
   let marketSection = `💱 USD Rp${formatRupiah(Math.round(usdIdrRate))}`
-
+  
   if (xauUsdPrice) {
     marketSection += ` | XAU $${xauUsdPrice.toFixed(2)}`
   }
-
+  
   const calendarSection = formatEconomicCalendar(economicEvents)
-
+  
   const grams20M = calculateProfit(buy, sell, 20000000).totalGrams
   const profit20M = calculateProfit(buy, sell, 20000000).profit
   const grams30M = calculateProfit(buy, sell, 30000000).totalGrams
   const profit30M = calculateProfit(buy, sell, 30000000).profit
-
+  
+  // Format gram dengan 4 digit desimal
   const formatGrams = (g) => g.toFixed(4)
-
+  
   return `${headerSection}${timeSection} | ${statusSection}
 
 💰 Beli ${buyFormatted} | Jual ${sellFormatted} (${spreadPercent > 0 ? '-' : ''}${spreadPercent}%)
 ${marketSection}
 
 🎁 20jt→${formatGrams(grams20M)}gr (+Rp${formatRupiah(Math.round(profit20M))}) | 30jt→${formatGrams(grams30M)}gr (+Rp${formatRupiah(Math.round(profit30M))})
-${calendarSection}⚡ Auto-update`
+${calendarSection}
+⚡ Auto-update`
 }
 async function fetchTreasury() {
   const res = await fetch(TREASURY_URL, {
@@ -1386,7 +1288,7 @@ async function start() {
 
         const sendTarget = msg.key.remoteJid
         
-        if (/\bmulai\b|\bsubscribe\b/.test(text)) {
+        if (/\blangganan\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
               text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD (auto-hide 3 jam)\n⚡ Ultra real-time (1 detik check interval)'
@@ -1394,14 +1296,14 @@ async function start() {
           } else {
             subscriptions.add(sendTarget)
             pushLog(`➕ New sub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
-
+            
             await sock.sendMessage(sendTarget, {
               text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD high-impact (auto-hide 3 jam)\n⚡ Ultra real-time (1 detik check interval)\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
         }
-
+        
         if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             subscriptions.delete(sendTarget)
