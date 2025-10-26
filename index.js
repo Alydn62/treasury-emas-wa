@@ -194,13 +194,13 @@ function calculateProfit(buyRate, sellRate, investmentAmount) {
 // ------ ECONOMIC CALENDAR FUNCTIONS ------
 async function fetchEconomicCalendar() {
   if (!ECONOMIC_CALENDAR_ENABLED) return null
-
+  
   const now = Date.now()
-
+  
   if (cachedEconomicEvents && (now - lastEconomicFetch) < ECONOMIC_CACHE_DURATION) {
     return cachedEconomicEvents
   }
-
+  
   try {
     const res = await fetch('https://nfs.faireconomy.media/ff_calendar_thisweek.json', {
       signal: AbortSignal.timeout(5000)
@@ -258,20 +258,12 @@ async function fetchEconomicCalendar() {
     
     // Limit to 10 events
     const limitedEvents = filteredEvents.slice(0, 10)
-
+    
     pushLog(`📅 Found ${limitedEvents.length} USD high-impact events (showing 3hrs window)`)
-
-    // Debug: Log first 3 events to check actual values
-    if (limitedEvents.length > 0) {
-      limitedEvents.slice(0, 3).forEach(event => {
-        const hasActual = event.actual && event.actual !== '-' && event.actual !== ''
-        pushLog(`  - ${event.title || 'Unknown'}: A=${event.actual || '-'} F=${event.forecast || '-'} ${hasActual ? '✅' : '⚠️'}`)
-      })
-    }
-
+    
     cachedEconomicEvents = limitedEvents
     lastEconomicFetch = now
-
+    
     return limitedEvents
     
   } catch (e) {
@@ -334,24 +326,7 @@ function analyzeGoldImpact(event) {
   if (title.includes('retail sales')) {
     return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
   }
-
-  // PMI: Di atas 50 = ekspansi = ekonomi kuat = jelek untuk gold
-  if (title.includes('pmi') || title.includes('manufacturing') || title.includes('services')) {
-    // Untuk PMI, nilai > 50 menunjukkan ekspansi ekonomi
-    // Jika actual > forecast = ekonomi lebih kuat = USD kuat = jelek untuk gold
-    return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
-  }
-
-  // Durable Goods Orders: Naik = ekonomi kuat = jelek untuk gold
-  if (title.includes('durable goods')) {
-    return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
-  }
-
-  // Consumer Confidence: Naik = ekonomi kuat = jelek untuk gold
-  if (title.includes('consumer confidence') || title.includes('consumer sentiment')) {
-    return actualNum > forecastNum ? 'JELEK' : 'BAGUS'
-  }
-
+  
   return null
 }
 
@@ -412,23 +387,15 @@ function formatEconomicCalendar(events) {
       }
     }
     
-    // Shortened title - enhanced detection
+    // Shortened title
     let shortTitle = title
-    const lowerTitle = title.toLowerCase()
-
-    if (lowerTitle.includes('non-farm') || lowerTitle.includes('nfp')) shortTitle = 'NFP'
-    else if (lowerTitle.includes('unemployment')) shortTitle = 'Unemp'
-    else if (lowerTitle.includes('interest rate') || lowerTitle.includes('fed funds')) shortTitle = 'Interest'
-    else if (lowerTitle.includes('cpi') || lowerTitle.includes('consumer price')) shortTitle = 'CPI'
-    else if (lowerTitle.includes('pce') || lowerTitle.includes('personal consumption')) shortTitle = 'PCE'
-    else if (lowerTitle.includes('gdp')) shortTitle = 'GDP'
-    else if (lowerTitle.includes('retail')) shortTitle = 'Retail'
-    else if (lowerTitle.includes('jobless') || lowerTitle.includes('claims')) shortTitle = 'Jobless'
-    else if (lowerTitle.includes('pmi') || lowerTitle.includes('manufacturing') || lowerTitle.includes('services')) {
-      if (lowerTitle.includes('manufacturing')) shortTitle = 'Manufacturing PMI'
-      else if (lowerTitle.includes('services')) shortTitle = 'Services PMI'
-      else shortTitle = 'PMI'
-    }
+    if (title.includes('Non-Farm')) shortTitle = 'NFP'
+    else if (title.includes('Unemployment')) shortTitle = 'Unemp'
+    else if (title.includes('Interest Rate')) shortTitle = 'Interest'
+    else if (title.includes('CPI')) shortTitle = 'CPI'
+    else if (title.includes('GDP')) shortTitle = 'GDP'
+    else if (title.includes('Retail')) shortTitle = 'Retail'
+    else if (title.includes('Jobless')) shortTitle = 'Jobless'
     
     calendarText += `• ${dayName} ${timeStr}`
     
@@ -437,24 +404,19 @@ function formatEconomicCalendar(events) {
     }
     
     calendarText += ` ${shortTitle}`
-
+    
     if (actual !== '-' && actual !== '') {
       const goldImpact = analyzeGoldImpact(event)
-
-      calendarText += ` A:${actual} F:${forecast}`
-
+      
+      calendarText += ` ${actual}>${forecast}`
+      
       if (goldImpact === 'BAGUS') {
         calendarText += ` 🟢 BAGUS`
       } else if (goldImpact === 'JELEK') {
         calendarText += ` 🔴 JELEK`
       }
     } else if (forecast !== '-') {
-      // Jika sudah lewat tapi tidak ada actual, tambahkan peringatan
-      if (timeSinceEvent > 0 && timeSinceEvent <= 3 * 60 * 60 * 1000) {
-        calendarText += ` F:${forecast} ⚠️ (data actual belum tersedia)`
-      } else {
-        calendarText += ` F:${forecast}`
-      }
+      calendarText += ` F:${forecast}`
     }
     
     calendarText += '\n'
