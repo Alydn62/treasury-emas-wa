@@ -85,14 +85,29 @@ let cachedMarketData = {
 }
 
 // Background task untuk pre-fetch market data
+// USD/IDR only fetched at second 50 of each minute
+// XAU/USD and calendar updated every 5 seconds
 setInterval(async () => {
   try {
-    const [usdIdr, xauUsd, economicEvents] = await Promise.all([
-      fetchUSDIDRFromGoogle(),
+    const currentSecond = new Date().getSeconds();
+
+    // Fetch USD/IDR only at second 50
+    let usdIdr = cachedMarketData.usdIdr;
+    if (currentSecond >= 50 && currentSecond <= 51) {
+      try {
+        usdIdr = await fetchUSDIDRFromGoogle();
+        console.log(`[${new Date().toISOString().substring(11, 19)}] USD/IDR updated at second ${currentSecond}`);
+      } catch (e) {
+        // Keep old USD/IDR if fetch fails
+      }
+    }
+
+    // Always fetch XAU/USD and economic calendar
+    const [xauUsd, economicEvents] = await Promise.all([
       fetchXAUUSDCached(),
       fetchEconomicCalendar()
-    ])
-    
+    ]);
+
     cachedMarketData = {
       usdIdr,
       xauUsd,
@@ -102,7 +117,7 @@ setInterval(async () => {
   } catch (e) {
     // Silent fail - keep old cache
   }
-}, 5000) // Update every 5 seconds
+}, 5000) // Check every 5 seconds, but USD/IDR only at second 50
 
 function pushLog(s) {
   const logMsg = `${new Date().toISOString().substring(11, 19)} ${s}`
@@ -1363,29 +1378,29 @@ async function start() {
 
         const sendTarget = msg.key.remoteJid
         
-        if (/\blangganan\b|\bsubscribe\b/.test(text)) {
+        if (/\bmulai\b|\bstart\b|\bsubscribe\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             await sock.sendMessage(sendTarget, {
-              text: '✅ Sudah berlangganan!\n\n📢 Update otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD (auto-hide 3 jam)\n⚡ Ultra real-time (1 detik check interval)'
+              text: '✅ Sudah aktif!\n\n📢 Update otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD (auto-hide 3 jam)\n⚡ Ultra real-time (1 detik check interval)'
             }, { quoted: msg })
           } else {
             subscriptions.add(sendTarget)
             pushLog(`➕ New sub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
-            
+
             await sock.sendMessage(sendTarget, {
-              text: '🎉 Langganan Berhasil!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD high-impact (auto-hide 3 jam)\n⚡ Ultra real-time (1 detik check interval)\n\n_Ketik "berhenti" untuk stop._'
+              text: '🎉 Berhasil Dimulai!\n\n📢 Notifikasi otomatis saat harga berubah\n⏰ Broadcast setiap ganti menit atau per 50 detik\n📅 Termasuk kalender ekonomi USD high-impact (auto-hide 3 jam)\n⚡ Ultra real-time (1 detik check interval)\n\n_Ketik "berhenti" untuk stop._'
             }, { quoted: msg })
           }
           continue
         }
-        
+
         if (/\bberhenti\b|\bunsubscribe\b|\bstop\b/.test(text)) {
           if (subscriptions.has(sendTarget)) {
             subscriptions.delete(sendTarget)
             pushLog(`➖ Unsub: ${sendTarget.substring(0, 15)} (total: ${subscriptions.size})`)
-            await sock.sendMessage(sendTarget, { text: '👋 Langganan dihentikan.' }, { quoted: msg })
+            await sock.sendMessage(sendTarget, { text: '👋 Notifikasi dihentikan.' }, { quoted: msg })
           } else {
-            await sock.sendMessage(sendTarget, { text: '❌ Belum berlangganan.' }, { quoted: msg })
+            await sock.sendMessage(sendTarget, { text: '❌ Belum aktif.' }, { quoted: msg })
           }
           continue
         }
