@@ -837,20 +837,9 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
     }
   }
   
+  // Status NORMAL/ABNORMAL removed per user request
+  // Keep empty for cleaner message format
   let statusSection = ''
-  if (xauUsdPrice && usdIdrRate) {
-    const analysis = analyzePriceStatus(buy, sell, xauUsdPrice, usdIdrRate)
-    
-    // ✅ TAMBAHKAN SELISIH UNTUK ABNORMAL
-    if (analysis.status === 'ABNORMAL') {
-      const diffFormatted = analysis.difference >= 0 
-        ? `+Rp${formatRupiah(Math.round(Math.abs(analysis.difference)))}` 
-        : `-Rp${formatRupiah(Math.round(Math.abs(analysis.difference)))}`
-      statusSection = `${analysis.emoji} ${analysis.message} = ${diffFormatted}`
-    } else {
-      statusSection = `${analysis.emoji} ${analysis.message}`
-    }
-  }
   
   let marketSection = `💱 USD Rp${formatRupiah(Math.round(usdIdrRate))}`
   
@@ -868,7 +857,7 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
   // Format gram dengan 4 digit desimal
   const formatGrams = (g) => g.toFixed(4)
   
-  return `${headerSection}${timeSection} | ${statusSection}
+  return `${headerSection}${timeSection}
 
 💰 Beli ${buyFormatted} | Jual ${sellFormatted} (${spreadPercent > 0 ? '-' : ''}${spreadPercent}%)
 ${marketSection}
