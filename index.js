@@ -765,72 +765,85 @@ async function fetchXAUUSDCached() {
 }
 
 function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) {
-  if (!xauUsdPrice) {
+  if (!xauUsdPrice || !usdIdrRate) {
     return {
       status: 'DATA_INCOMPLETE',
-      message: '⚠️ Data Incomplete'
+      message: '⚠️ Data Incomplete',
+      emoji: '⚠️'
     }
   }
 
-  // Calculate international price with Treasury's typical spread
-  // Treasury uses internal rates: sell ~16,518 buy ~17,081 when market is ~16,600
-  // This means they have about 0.5-0.7% lower rate for selling
-  const TREASURY_SELL_ADJUSTMENT = 0.994  // Treasury sells at 99.4% of market rate
-  const adjustedUsdIdrRate = usdIdrRate * TREASURY_SELL_ADJUSTMENT
+  // Range NORMAL: margin 1.2% - 1.35%
+  const TROY_OZ_TO_GRAM_EXACT = 31.1035
+  const MIN_MARGIN = 1.012  // 1.2%
+  const MAX_MARGIN = 1.0135 // 1.35%
 
-  const internationalPricePerGram = (xauUsdPrice / TROY_OZ_TO_GRAM) * adjustedUsdIdrRate
-  const difference = treasurySell - internationalPricePerGram
-  const percentDiff = Math.abs((difference / internationalPricePerGram) * 100)
+  // Hitung harga dasar internasional
+  const basePrice = (xauUsdPrice * usdIdrRate) / TROY_OZ_TO_GRAM_EXACT
 
-  // Log for debugging
-  console.log(`[PRICE ANALYSIS]`)
-  console.log(`  XAU/USD: $${xauUsdPrice.toFixed(2)}/oz`)
-  console.log(`  USD/IDR Market: Rp ${usdIdrRate.toLocaleString('id-ID')}`)
-  console.log(`  USD/IDR Adjusted: Rp ${Math.round(adjustedUsdIdrRate).toLocaleString('id-ID')} (Treasury rate)`)
-  console.log(`  International: Rp ${Math.round(internationalPricePerGram).toLocaleString('id-ID')}/gr`)
-  console.log(`  Treasury Sell: Rp ${treasurySell.toLocaleString('id-ID')}/gr`)
-  console.log(`  Difference: Rp ${Math.round(difference).toLocaleString('id-ID')} (${percentDiff.toFixed(2)}%)`)
+  // Hitung batas bawah dan atas untuk range NORMAL
+  const lowerBound = basePrice * MIN_MARGIN
+  const upperBound = basePrice * MAX_MARGIN
 
+  // Hitung selisih dari range NORMAL
+  let difference = 0
   let status = 'NORMAL'
   let emoji = '✅'
-  let message = 'NORMAL'
+  let message = '✅ NORMAL'
 
-  // Use Rp 2,000 threshold with adjusted calculation
-  if (Math.abs(difference) <= NORMAL_LOW_THRESHOLD) {
-    status = 'NORMAL'
-    emoji = '✅'
-    message = 'NORMAL'
-  } else if (Math.abs(difference) <= NORMAL_THRESHOLD) {
-    status = 'NORMAL'
-    emoji = '✅'
-    message = 'NORMAL'
-  } else {
+  if (treasurySell < lowerBound) {
+    // Di bawah range NORMAL (margin < 1.2%)
+    difference = treasurySell - lowerBound  // akan negatif
     status = 'ABNORMAL'
-    emoji = '❌'
-    message = 'ABNORMAL'
-    console.log(`  ⚠️ ABNORMAL detected: difference > Rp ${NORMAL_THRESHOLD}`)
+    emoji = '⚠️'
+    message = `⚠️ TIDAK NORMAL (${difference > 0 ? '+' : ''}${formatRupiah(Math.round(difference))})`
+  } else if (treasurySell > upperBound) {
+    // Di atas range NORMAL (margin > 1.35%)
+    difference = treasurySell - upperBound  // akan positif
+    status = 'ABNORMAL'
+    emoji = '⚠️'
+    message = `⚠️ TIDAK NORMAL (+${formatRupiah(Math.round(difference))})`
+  }
+
+  // Calculate actual margin percentage
+  const actualMargin = ((treasurySell - basePrice) / basePrice) * 100
+
+  // Log for debugging
+  console.log(`[PRICE ANALYSIS - RANGE CHECK]`)
+  console.log(`  XAU/USD: $${xauUsdPrice.toFixed(2)}/oz`)
+  console.log(`  USD/IDR: Rp ${usdIdrRate.toLocaleString('id-ID')}`)
+  console.log(`  Base Price: Rp ${Math.round(basePrice).toLocaleString('id-ID')}/gr`)
+  console.log(`  Normal Range: Rp ${Math.round(lowerBound).toLocaleString('id-ID')} - Rp ${Math.round(upperBound).toLocaleString('id-ID')}`)
+  console.log(`  Treasury Sell: Rp ${treasurySell.toLocaleString('id-ID')}/gr`)
+  console.log(`  Actual Margin: ${actualMargin.toFixed(2)}%`)
+  console.log(`  Status: ${status}`)
+  if (difference !== 0) {
+    console.log(`  Selisih dari range: ${difference > 0 ? '+' : ''}Rp ${Math.round(Math.abs(difference)).toLocaleString('id-ID')}`)
   }
 
   return {
     status,
     emoji,
     message,
-    internationalPrice: internationalPricePerGram,
+    basePrice,
+    lowerBound,
+    upperBound,
+    treasuryPrice: treasurySell,
     difference,
-    percentDiff
+    actualMargin
   }
 }
 
 function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange = null, economicEvents = null) {
   const buy = treasuryData?.data?.buying_rate || 0
   const sell = treasuryData?.data?.selling_rate || 0
-  
+
   const spread = sell - buy
   const spreadPercent = ((spread / buy) * 100).toFixed(2)
-  
+
   const buyFormatted = `Rp${formatRupiah(buy)}/gr`
   const sellFormatted = `Rp${formatRupiah(sell)}/gr`
-  
+
   const updatedAt = treasuryData?.data?.updated_at
   let timeSection = ''
   if (updatedAt) {
@@ -842,7 +855,7 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
     const seconds = date.getSeconds().toString().padStart(2, '0')
     timeSection = `${dayName} ${hours}:${minutes}:${seconds} WIB`
   }
-  
+
   let headerSection = ''
   if (priceChange && priceChange.buyChange !== 0) {
     if (priceChange.buyChange > 0) {
@@ -851,28 +864,31 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
       headerSection = '🔻 🔻 TURUN 🔻 🔻\n'
     }
   }
-  
-  // Status NORMAL/ABNORMAL removed per user request
-  // Keep empty for cleaner message format
+
+  // Analisis status harga dengan rumus user
   let statusSection = ''
-  
+  if (xauUsdPrice && usdIdrRate) {
+    const priceStatus = analyzePriceStatus(buy, sell, xauUsdPrice, usdIdrRate)
+    statusSection = `\n${priceStatus.message}`
+  }
+
   let marketSection = `💱 USD Rp${formatRupiah(Math.round(usdIdrRate))}`
-  
+
   if (xauUsdPrice) {
     marketSection += ` | XAU $${xauUsdPrice.toFixed(2)}`
   }
-  
+
   const calendarSection = formatEconomicCalendar(economicEvents)
-  
+
   const grams20M = calculateProfit(buy, sell, 20000000).totalGrams
   const profit20M = calculateProfit(buy, sell, 20000000).profit
   const grams30M = calculateProfit(buy, sell, 30000000).totalGrams
   const profit30M = calculateProfit(buy, sell, 30000000).profit
-  
+
   // Format gram dengan 4 digit desimal
   const formatGrams = (g) => g.toFixed(4)
-  
-  return `${headerSection}${timeSection}
+
+  return `${headerSection}${timeSection}${statusSection}
 
 💰 Beli ${buyFormatted} | Jual ${sellFormatted} (${spreadPercent > 0 ? '-' : ''}${spreadPercent}%)
 ${marketSection}
@@ -1027,17 +1043,63 @@ async function checkPriceUpdate() {
       lastBroadcastedPrice = currentPrice
       lastPriceUpdateTime = Date.now()
       pushLog(`📊 Initial: Buy=${formatRupiah(currentPrice.buy)}, Sell=${formatRupiah(currentPrice.sell)}`)
+
+      // Check initial price status
+      if (cachedMarketData.xauUsd && cachedMarketData.usdIdr) {
+        const priceStatus = analyzePriceStatus(
+          currentPrice.buy,
+          currentPrice.sell,
+          cachedMarketData.xauUsd,
+          cachedMarketData.usdIdr.rate
+        )
+        if (priceStatus.status === 'ABNORMAL') {
+          pushLog(`⚠️ INITIAL PRICE IS TIDAK NORMAL!`)
+        }
+      }
       return
     }
     
     const buyChanged = lastKnownPrice.buy !== currentPrice.buy
     const sellChanged = lastKnownPrice.sell !== currentPrice.sell
-    
+
     // ⏱️ STALE PRICE DETECTION
     const now = Date.now()
     const timeSinceLastUpdate = now - lastPriceUpdateTime
     const isPriceStale = timeSinceLastUpdate >= STALE_PRICE_THRESHOLD
-    
+
+    // Check jika status berubah dari NORMAL ke TIDAK NORMAL atau sebaliknya
+    let statusChanged = false
+    let currentStatus = null
+    let previousStatus = null
+
+    if (cachedMarketData.xauUsd && cachedMarketData.usdIdr) {
+      const currentPriceStatus = analyzePriceStatus(
+        currentPrice.buy,
+        currentPrice.sell,
+        cachedMarketData.xauUsd,
+        cachedMarketData.usdIdr.rate
+      )
+      currentStatus = currentPriceStatus.status
+
+      const lastPriceStatus = analyzePriceStatus(
+        lastKnownPrice.buy,
+        lastKnownPrice.sell,
+        cachedMarketData.xauUsd,
+        cachedMarketData.usdIdr.rate
+      )
+      previousStatus = lastPriceStatus.status
+
+      statusChanged = currentStatus !== previousStatus
+
+      if (statusChanged) {
+        if (currentStatus === 'ABNORMAL') {
+          pushLog(`⚠️ STATUS CHANGED: NORMAL → TIDAK NORMAL!`)
+        } else if (currentStatus === 'NORMAL') {
+          pushLog(`✅ STATUS CHANGED: TIDAK NORMAL → NORMAL`)
+        }
+      }
+    }
+
     if (!buyChanged && !sellChanged) {
       // Tidak ada perubahan harga
       if (isPriceStale) {
@@ -1070,10 +1132,13 @@ async function checkPriceUpdate() {
     const isNewMinute = currentMinute !== lastMinute
     
     // 🎯 LOGIKA BROADCAST:
-    // 1. Jika harga stale (5+ menit tidak update) → BROADCAST LANGSUNG saat ada update baru
-    // 2. Jika harga tidak stale → ikuti cooldown normal (50 detik ATAU ganti menit)
-    
-    const shouldBroadcast = isPriceStale 
+    // 1. Jika status berubah ke TIDAK NORMAL → BROADCAST LANGSUNG (prioritas tinggi!)
+    // 2. Jika harga stale (5+ menit tidak update) → BROADCAST LANGSUNG saat ada update baru
+    // 3. Jika harga tidak stale → ikuti cooldown normal (50 detik ATAU ganti menit)
+
+    const shouldBroadcast = statusChanged && currentStatus === 'ABNORMAL'
+      ? true  // Langsung broadcast jika status berubah ke TIDAK NORMAL
+      : isPriceStale
       ? true  // Langsung broadcast jika harga baru setelah 5 menit stale
       : (timeSinceLastBroadcast >= BROADCAST_COOLDOWN || isNewMinute)
     
