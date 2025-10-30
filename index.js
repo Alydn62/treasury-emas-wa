@@ -773,10 +773,10 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
     }
   }
 
-  // Range NORMAL: margin 1.2% - 1.35%
+  // Range NORMAL: margin 0.97% - 1.25%
   const TROY_OZ_TO_GRAM_EXACT = 31.1035
-  const MIN_MARGIN = 1.012  // 1.2%
-  const MAX_MARGIN = 1.0135 // 1.35%
+  const MIN_MARGIN = 1.0097  // 0.97%
+  const MAX_MARGIN = 1.0125  // 1.25%
 
   // Hitung harga dasar internasional
   const basePrice = (xauUsdPrice * usdIdrRate) / TROY_OZ_TO_GRAM_EXACT
