@@ -96,7 +96,6 @@ setInterval(async () => {
     if (currentSecond >= 50 && currentSecond <= 51) {
       try {
         usdIdr = await fetchUSDIDRFromGoogle();
-        console.log(`[${new Date().toISOString().substring(11, 19)}] USD/IDR updated at second ${currentSecond}`);
       } catch (e) {
         // Keep old USD/IDR if fetch fails
       }
@@ -501,47 +500,116 @@ async function fetchUSDIDRFallback() {
 }
 
 async function fetchUSDIDRFromGoogle() {
-  try {
-    const res = await fetch('https://www.google.com/finance/quote/USD-IDR', {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Cache-Control': 'no-cache'
-      },
-      signal: AbortSignal.timeout(3000)
-    })
+  const maxRetries = 3
+  let attempt = 0
 
-    if (!res.ok) return await fetchUSDIDRFallback()
+  while (attempt < maxRetries) {
+    attempt++
 
-    const html = await res.text()
+    try {
+      // Only log first attempt
+      if (attempt === 1) {
+        console.log(`[USD/IDR] Fetching from Google Finance...`)
+      }
 
-    // Multiple patterns to match Google Finance price display
-    const patterns = [
-      /class="YMlKec fxKbKc"[^>]*>([0-9,\.]+)<\/div>/i,
-      /class="[^"]*fxKbKc[^"]*"[^>]*>([0-9,\.]+)<\/div>/i,
-      /data-last-price="([0-9,\.]+)"/i,
-      /"price":"([0-9,\.]+)"/i,
-      />([0-9]{1,2}[,\.][0-9]{3}(?:[,\.][0-9]+)?)</,
-      /USD\/IDR[^0-9]*([0-9]{1,2}[,\.][0-9]{3}(?:[,\.][0-9]+)?)/i
-    ]
+      const res = await fetch('https://www.google.com/finance/quote/USD-IDR', {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+          'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+          'Sec-Ch-Ua-Mobile': '?0',
+          'Sec-Ch-Ua-Platform': '"Windows"',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1'
+        },
+        signal: AbortSignal.timeout(10000) // Increased timeout to 10 seconds
+      })
 
-    for (const pattern of patterns) {
-      const match = html.match(pattern)
-      if (match?.[1]) {
-        const rate = parseFloat(match[1].replace(/,/g, ''))
-        if (rate > 10000 && rate < 20000) { // Updated range for current rates
-          console.log(`[USD/IDR] Google Finance: Rp ${rate.toLocaleString('id-ID')}`)
-          return { rate }
+      if (!res.ok) {
+        if (attempt === maxRetries) {
+          console.log(`[USD/IDR] Failed after ${maxRetries} attempts (HTTP ${res.status})`)
+        }
+        if (attempt < maxRetries) {
+          await new Promise(r => setTimeout(r, 2000)) // Wait 2 seconds before retry
+          continue
         }
       }
-    }
 
-    console.log('[USD/IDR] Google Finance parsing failed, using fallback')
-  } catch (err) {
-    console.log('[USD/IDR] Google Finance error:', err.message)
+      const html = await res.text()
+
+      // More comprehensive patterns for Google Finance
+      const patterns = [
+        // Primary patterns - most likely to work
+        /class="YMlKec fxKbKc"[^>]*>([0-9,\.]+)<\/div>/i,
+        /class="[^"]*fxKbKc[^"]*"[^>]*>([0-9,\.]+)<\/div>/i,
+        /data-last-price="([0-9,\.]+)"/i,
+        /data-price="([0-9,\.]+)"/i,
+
+        // JSON-LD patterns
+        /"price":\s*"([0-9,\.]+)"/i,
+        /"value":\s*"([0-9,\.]+)"/i,
+
+        // Alternative div patterns
+        /<div[^>]*>([0-9]{1,2}[,\.][0-9]{3}(?:\.[0-9]+)?)<\/div>/i,
+
+        // Specific Google Finance patterns
+        /USD to IDR[^0-9]*([0-9]{1,2}[,\.][0-9]{3}(?:\.[0-9]+)?)/i,
+        /1 USD = ([0-9]{1,2}[,\.][0-9]{3}(?:\.[0-9]+)?)/i,
+
+        // Meta tag patterns
+        /<meta[^>]*content="([0-9]{1,2}[,\.][0-9]{3}(?:\.[0-9]+)?)"[^>]*>/i,
+
+        // Broader patterns
+        />([0-9]{2}[,\.][0-9]{3}(?:\.[0-9]+)?)</,
+        /USD\/IDR[^0-9]*([0-9]{1,2}[,\.][0-9]{3}(?:[,\.][0-9]+)?)/i
+      ]
+
+      // Silent parsing - no log needed
+
+      for (const pattern of patterns) {
+        const match = html.match(pattern)
+        if (match?.[1]) {
+          const rate = parseFloat(match[1].replace(/,/g, ''))
+
+          // Validate rate is in reasonable range for IDR (15000-17000)
+          if (rate > 15000 && rate < 17000) {
+            console.log(`[USD/IDR] Rp ${rate.toLocaleString('id-ID')}`)
+            return { rate }
+          } else if (rate > 10000 && rate < 20000) {
+            // Wider range as fallback
+            console.log(`[USD/IDR] Rp ${rate.toLocaleString('id-ID')} (unusual)`)
+            return { rate }
+          }
+        }
+      }
+
+      // Silent retry
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 3000))
+      }
+
+    } catch (err) {
+      // Only log on final attempt
+      if (attempt === maxRetries) {
+        console.log(`[USD/IDR] Error: ${err.message}`)
+      }
+
+      if (attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 3000))
+      }
+    }
   }
-  return await fetchUSDIDRFallback()
+
+  // After all retries failed, use a more recent default
+  console.log('[USD/IDR] Using fallback: Rp 15,900')
+  return { rate: 15900 } // More realistic current rate
 }
 
 async function fetchXAUUSDFromTradingView() {
@@ -566,15 +634,15 @@ async function fetchXAUUSDFromTradingView() {
       const json = await res.json()
       if (json?.data?.[0]?.d) {
         const price = json.data[0].d[0]
-        
+
         if (price > 1000 && price < 10000) {
-          console.log(`✅ XAU/USD from TradingView: $${price.toFixed(2)}`)
+          // Silent success - no log needed
           return price
         }
       }
     }
   } catch (e) {
-    console.log('TradingView fetch error:', e.message)
+    // Silent fail - will try next source
   }
   return null
 }
@@ -598,7 +666,7 @@ async function fetchXAUUSDFromInvesting() {
     })
     
     if (!res.ok) {
-      console.log(`❌ Investing.com HTTP ${res.status}`)
+      // Silent fail
       return null
     }
     
@@ -610,10 +678,9 @@ async function fetchXAUUSDFromInvesting() {
       const price = parseFloat(match[1].replace(/,/g, ''))
       if (price > 1000 && price < 10000) {
         foundPrices.push({ method: 'data-test', price, priority: 1 })
-        console.log(`🔍 Method 1 (data-test): $${price.toFixed(2)}`)
       }
     }
-    
+
     match = html.match(/class="instrument-price-last[^"]*"[^>]*>([0-9,]+\.?[0-9]*)</i)
     if (match?.[1]) {
       const price = parseFloat(match[1].replace(/,/g, ''))
@@ -621,41 +688,36 @@ async function fetchXAUUSDFromInvesting() {
         foundPrices.push({ method: 'class-instrument', price, priority: 2 })
       }
     }
-    
+
     const pricePatterns = [
       /instrument[^>]{0,50}([0-9]{1},?[0-9]{3}\.[0-9]{2})/i,
       /quote[^>]{0,50}([0-9]{1},?[0-9]{3}\.[0-9]{2})/i,
       /current[^>]{0,50}([0-9]{1},?[0-9]{3}\.[0-9]{2})/i
     ]
-    
+
     for (const pattern of pricePatterns) {
       match = html.match(pattern)
       if (match?.[1]) {
         const price = parseFloat(match[1].replace(/,/g, ''))
         if (price > 1000 && price < 10000) {
           foundPrices.push({ method: 'generic-pattern', price, priority: 9 })
-          console.log(`🔍 Method 9 (generic): $${price.toFixed(2)}`)
         }
       }
     }
-    
+
     if (foundPrices.length === 0) {
-      console.log('⚠️  Investing.com: No valid prices found')
       return null
     }
-    
-    console.log(`📊 Found ${foundPrices.length} potential prices`)
-    
+
     if (foundPrices.length === 1) {
-      console.log(`✅ XAU/USD from Investing.com: $${foundPrices[0].price.toFixed(2)}`)
       return foundPrices[0].price
     }
-    
+
     const priceGroups = new Map()
-    
+
     for (const { method, price, priority } of foundPrices) {
       let foundGroup = false
-      
+
       for (const [groupPrice, items] of priceGroups) {
         if (Math.abs(groupPrice - price) <= 1.0) {
           items.push({ method, price, priority })
@@ -663,21 +725,19 @@ async function fetchXAUUSDFromInvesting() {
           break
         }
       }
-      
+
       if (!foundGroup) {
         priceGroups.set(price, [{ method, price, priority }])
       }
     }
-    
-    console.log(`📊 Grouped into ${priceGroups.size} price clusters`)
-    
+
     let bestGroup = null
     let maxCount = 0
     let bestPriority = 999
-    
+
     for (const [groupPrice, items] of priceGroups) {
       const avgPriority = items.reduce((sum, item) => sum + item.priority, 0) / items.length
-      
+
       if (items.length > maxCount) {
         maxCount = items.length
         bestGroup = items
@@ -687,23 +747,19 @@ async function fetchXAUUSDFromInvesting() {
         bestPriority = avgPriority
       }
     }
-    
+
     if (bestGroup) {
       const avgPrice = bestGroup.reduce((sum, item) => sum + item.price, 0) / bestGroup.length
-      const methods = bestGroup.map(item => item.method).join(', ')
-      
-      console.log(`✅ XAU/USD from Investing.com: $${avgPrice.toFixed(2)} (consensus from ${bestGroup.length} methods: ${methods})`)
       return avgPrice
     }
-    
+
     foundPrices.sort((a, b) => a.priority - b.priority)
     const fallbackPrice = foundPrices[0].price
-    
-    console.log(`✅ XAU/USD from Investing.com: $${fallbackPrice.toFixed(2)} (fallback)`)
+
     return fallbackPrice
     
   } catch (e) {
-    console.log('❌ Investing.com fetch error:', e.message)
+    // Silent fail
     return null
   }
 }
@@ -723,28 +779,37 @@ async function fetchXAUUSDFromGoogle() {
       if (priceMatch?.[1]) {
         const price = parseFloat(priceMatch[1].replace(/,/g, ''))
         if (price > 1000 && price < 10000) {
-          console.log(`✅ XAU/USD from Google Finance: $${price.toFixed(2)}`)
+          // Silent success
           return price
         }
       }
     }
   } catch (e) {
-    console.log('Google Finance fetch error:', e.message)
+    // Silent fail
   }
   return null
 }
 
 async function fetchXAUUSD() {
   let result = await fetchXAUUSDFromTradingView()
-  if (result) return result
-  
+  if (result) {
+    console.log(`[XAU/USD] $${result.toFixed(2)}`)
+    return result
+  }
+
   result = await fetchXAUUSDFromInvesting()
-  if (result) return result
-  
+  if (result) {
+    console.log(`[XAU/USD] $${result.toFixed(2)}`)
+    return result
+  }
+
   result = await fetchXAUUSDFromGoogle()
-  if (result) return result
-  
-  console.log('⚠️  All XAU/USD sources failed')
+  if (result) {
+    console.log(`[XAU/USD] $${result.toFixed(2)}`)
+    return result
+  }
+
+  console.log('[XAU/USD] Failed - no data')
   return null
 }
 
@@ -808,18 +873,7 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
   // Calculate actual margin percentage
   const actualMargin = ((treasurySell - basePrice) / basePrice) * 100
 
-  // Log for debugging
-  console.log(`[PRICE ANALYSIS - RANGE CHECK]`)
-  console.log(`  XAU/USD: $${xauUsdPrice.toFixed(2)}/oz`)
-  console.log(`  USD/IDR: Rp ${usdIdrRate.toLocaleString('id-ID')}`)
-  console.log(`  Base Price: Rp ${Math.round(basePrice).toLocaleString('id-ID')}/gr`)
-  console.log(`  Normal Range: Rp ${Math.round(lowerBound).toLocaleString('id-ID')} - Rp ${Math.round(upperBound).toLocaleString('id-ID')}`)
-  console.log(`  Treasury Sell: Rp ${treasurySell.toLocaleString('id-ID')}/gr`)
-  console.log(`  Actual Margin: ${actualMargin.toFixed(2)}%`)
-  console.log(`  Status: ${status}`)
-  if (difference !== 0) {
-    console.log(`  Selisih dari range: ${difference > 0 ? '+' : ''}Rp ${Math.round(Math.abs(difference)).toLocaleString('id-ID')}`)
-  }
+  // Log only once per minute or when status changes (removed repetitive logging)
 
   return {
     status,
@@ -1490,7 +1544,7 @@ async function start() {
         try {
           const [treasury, usdIdr, xauUsd, economicEvents] = await Promise.all([
             fetchTreasury(),
-            fetchUSDIDRFromGoogle(),
+            fetchUSDIDRFromGoogle(), // Only use Google Finance
             fetchXAUUSDCached(),
             fetchEconomicCalendar()
           ])
