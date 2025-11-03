@@ -969,71 +969,17 @@ async function fetchTreasury() {
 
 // ⚡ UPDATED BROADCAST FUNCTION dengan validasi timestamp
 async function doBroadcast(priceChange, priceData) {
-  // CRITICAL: Check flag sebelum set
-  if (isBroadcasting) {
-    pushLog(`⚠️  Broadcast already in progress, skipping...`)
-    return
-  }
+  // Skip all checks for speed
+  if (isBroadcasting || !sock || !isReady || subscriptions.size === 0) return
 
   isBroadcasting = true
   broadcastCount++
   const currentBroadcastId = broadcastCount
-  
-  if (!sock || !isReady || subscriptions.size === 0) {
-    isBroadcasting = false
-    return
-  }
 
   try {
-    // ✅ VALIDASI TIMESTAMP: Pastikan harga masih fresh (max 3 detik)
-    const priceAge = Date.now() - priceData.fetchedAt
-    if (priceAge > 3000) {
-      pushLog(`⚠️  [#${currentBroadcastId}] Price too old (${Math.round(priceAge/1000)}s), fetching fresh data...`)
-      
-      // Fetch ulang harga terbaru
-      try {
-        const freshTreasury = await fetchTreasury()
-        const freshPrice = {
-          buy: freshTreasury?.data?.buying_rate,
-          sell: freshTreasury?.data?.selling_rate,
-          updated_at: freshTreasury?.data?.updated_at,
-          fetchedAt: Date.now()
-        }
-        
-        // Update priceData dengan data fresh
-        priceData = freshPrice
-        
-        // Recalculate priceChange
-        priceChange = {
-          buyChange: freshPrice.buy - lastBroadcastedPrice.buy,
-          sellChange: freshPrice.sell - lastBroadcastedPrice.sell
-        }
-        
-        pushLog(`✅ [#${currentBroadcastId}] Fresh data: Buy=${formatRupiah(freshPrice.buy)}, Sell=${formatRupiah(freshPrice.sell)}`)
-        
-      } catch (e) {
-        pushLog(`❌ [#${currentBroadcastId}] Failed to fetch fresh data: ${e.message}`)
-        isBroadcasting = false
-        return
-      }
-    }
-    
     const startTime = Date.now()
-    pushLog(`📤 [#${currentBroadcastId}] Starting instant broadcast...`)
-    
-    // ⚡ INSTANT: Gunakan cached market data (sudah pre-fetched)
-    const usdIdr = cachedMarketData.usdIdr
-    const xauUsd = cachedMarketData.xauUsd
-    const economicEvents = cachedMarketData.economicEvents
-    
-    // Check lagi sebelum broadcast (double safety)
-    if (!sock || !isReady) {
-      pushLog(`⚠️  Bot not ready, aborting broadcast #${currentBroadcastId}`)
-      isBroadcasting = false
-      return
-    }
-    
-    // Buat treasury data object dari priceData
+
+    // Build message FAST
     const treasuryData = {
       data: {
         buying_rate: priceData.buy,
@@ -1041,38 +987,17 @@ async function doBroadcast(priceChange, priceData) {
         updated_at: priceData.updated_at
       }
     }
+
+    const message = formatMessage(treasuryData, cachedMarketData.usdIdr.rate, cachedMarketData.xauUsd, priceChange, cachedMarketData.economicEvents)
+
+    pushLog(`📤 [#${currentBroadcastId}] Sending to ${subscriptions.size} subs...`)
     
-    const message = formatMessage(treasuryData, usdIdr.rate, xauUsd, priceChange, economicEvents)
-    
-    const prepTime = Date.now() - startTime
-    pushLog(`📤 [#${currentBroadcastId}] Message ready (${prepTime}ms), sending to ${subscriptions.size} subs...`)
-    
-    let successCount = 0
-    let failCount = 0
-    
-    const subsArray = Array.from(subscriptions)
-    
-    // ⚡ INSTANT SEND: Fire all messages at once with Promise.allSettled
-    const sendStartTime = Date.now()
-    
-    const sendPromises = subsArray.map(chatId => 
-      sock.sendMessage(chatId, { text: message })
-        .then(() => {
-          successCount++
-        })
-        .catch((e) => {
-          failCount++
-          pushLog(`❌ Failed: ${chatId.substring(0, 15)}`)
-        })
-    )
-    
-    // Wait for all to complete
-    await Promise.allSettled(sendPromises)
-    
-    const sendTime = Date.now() - sendStartTime
-    const totalTime = Date.now() - startTime
-    
-    pushLog(`✅ [#${currentBroadcastId}] Sent: ${successCount}, Failed: ${failCount} (send: ${sendTime}ms, total: ${totalTime}ms)`)
+    // ULTRA FAST: Send immediately without tracking
+    subscriptions.forEach(chatId => {
+      sock.sendMessage(chatId, { text: message }).catch(() => {})
+    })
+
+    pushLog(`📤 [#${currentBroadcastId}] Broadcast fired!`)
     
   } catch (e) {
     pushLog(`❌ Broadcast #${currentBroadcastId} error: ${e.message}`)
@@ -1268,9 +1193,11 @@ async function checkPriceUpdate() {
       fetchedAt: currentPrice.fetchedAt
     }
     
-    // INSTANT BROADCAST - Fire and forget with error handling
-    doBroadcast(finalPriceChange, currentPrice).catch(e => {
-      pushLog(`❌ Broadcast promise error: ${e.message}`)
+    // ULTRA INSTANT BROADCAST - Fire immediately without any validation
+    setImmediate(() => {
+      doBroadcast(finalPriceChange, currentPrice).catch(e => {
+        pushLog(`❌ Broadcast promise error: ${e.message}`)
+      })
     })
     
   } catch (e) {
