@@ -858,10 +858,12 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
 
   let headerSection = ''
   if (priceChange && priceChange.buyChange !== 0) {
+    const changeAmount = Math.abs(priceChange.buyChange)
+    const changeFormatted = formatRupiah(changeAmount)
     if (priceChange.buyChange > 0) {
-      headerSection = '🚀 🚀 NAIK 🚀 🚀\n'
+      headerSection = `🚀 🚀 NAIK 🚀 🚀 (+Rp${changeFormatted})\n`
     } else {
-      headerSection = '🔻 🔻 TURUN 🔻 🔻\n'
+      headerSection = `🔻 🔻 TURUN 🔻 🔻 (-Rp${changeFormatted})\n`
     }
   }
 
