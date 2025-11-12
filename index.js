@@ -20,9 +20,9 @@ const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
 
 // BROADCAST COOLDOWN
-const PRICE_CHECK_INTERVAL = 1000 // 1 DETIK - ULTRA REAL-TIME!
+const PRICE_CHECK_INTERVAL = 500 // 0.5 DETIK - SUPER ULTRA REAL-TIME!
 const MIN_PRICE_CHANGE = 1
-const BROADCAST_COOLDOWN = 50000 // 50 detik antar broadcast (atau ganti menit)
+const BROADCAST_COOLDOWN = 30000 // 30 detik antar broadcast (atau ganti menit) - LEBIH CEPAT!
 
 // Economic Calendar Settings
 const ECONOMIC_CALENDAR_ENABLED = true
@@ -55,6 +55,7 @@ let lastBroadcastedPrice = null
 let isBroadcasting = false
 let broadcastCount = 0
 let lastBroadcastTime = 0
+let isCheckingPrice = false // Mutex to prevent concurrent price checks
 
 // ⏱️ STALE PRICE DETECTION
 let lastPriceUpdateTime = 0  // Kapan terakhir harga berubah dari API
@@ -85,18 +86,23 @@ let cachedMarketData = {
 }
 
 // Background task untuk pre-fetch market data
-// USD/IDR only fetched at second 50 of each minute
+// USD/IDR fetched every 20 seconds to avoid errors
 // XAU/USD and calendar updated every 5 seconds
+let lastUSDIDRFetch = 0;
+const USD_IDR_FETCH_INTERVAL = 20000; // 20 seconds interval for USD/IDR
+
 setInterval(async () => {
   try {
-    const currentSecond = new Date().getSeconds();
+    const now = Date.now();
 
-    // Fetch USD/IDR only at second 50
+    // Fetch USD/IDR every 20 seconds
     let usdIdr = cachedMarketData.usdIdr;
-    if (currentSecond >= 50 && currentSecond <= 51) {
+    if (now - lastUSDIDRFetch >= USD_IDR_FETCH_INTERVAL) {
       try {
         usdIdr = await fetchUSDIDRFromGoogle();
+        lastUSDIDRFetch = now;
       } catch (e) {
+        console.log('[USD/IDR] Fetch error, keeping cached value:', e.message);
         // Keep old USD/IDR if fetch fails
       }
     }
@@ -114,9 +120,10 @@ setInterval(async () => {
       lastUpdate: Date.now()
     }
   } catch (e) {
+    console.log('[Market Data] Update error:', e.message);
     // Silent fail - keep old cache
   }
-}, 5000) // Check every 5 seconds, but USD/IDR only at second 50
+}, 5000) // Check every 5 seconds, USD/IDR with 20s interval
 
 function pushLog(s) {
   const logMsg = `${new Date().toISOString().substring(11, 19)} ${s}`
@@ -500,8 +507,15 @@ async function fetchUSDIDRFallback() {
 }
 
 async function fetchUSDIDRFromGoogle() {
-  const maxRetries = 3
+  const maxRetries = 2 // Reduced retries for faster fallback
   let attempt = 0
+
+  // Check if we have a recent cached value (less than 1 minute old)
+  if (cachedMarketData.usdIdr && cachedMarketData.usdIdr.rate &&
+      cachedMarketData.lastUpdate && (Date.now() - cachedMarketData.lastUpdate < 60000)) {
+    console.log(`[USD/IDR] Using cached: Rp ${cachedMarketData.usdIdr.rate.toLocaleString('id-ID')}`);
+    return cachedMarketData.usdIdr;
+  }
 
   while (attempt < maxRetries) {
     attempt++
@@ -529,15 +543,15 @@ async function fetchUSDIDRFromGoogle() {
           'Sec-Fetch-User': '?1',
           'Upgrade-Insecure-Requests': '1'
         },
-        signal: AbortSignal.timeout(10000) // Increased timeout to 10 seconds
+        signal: AbortSignal.timeout(15000) // Increased timeout to 15 seconds
       })
 
       if (!res.ok) {
         if (attempt === maxRetries) {
-          console.log(`[USD/IDR] Failed after ${maxRetries} attempts (HTTP ${res.status})`)
+          console.log(`[USD/IDR] Failed (HTTP ${res.status}), using fallback`)
         }
         if (attempt < maxRetries) {
-          await new Promise(r => setTimeout(r, 2000)) // Wait 2 seconds before retry
+          await new Promise(r => setTimeout(r, 5000)) // Wait 5 seconds before retry
           continue
         }
       }
@@ -578,8 +592,8 @@ async function fetchUSDIDRFromGoogle() {
         if (match?.[1]) {
           const rate = parseFloat(match[1].replace(/,/g, ''))
 
-          // Validate rate is in reasonable range for IDR (15000-17000)
-          if (rate > 15000 && rate < 17000) {
+          // Validate rate is in reasonable range for IDR (15000-17500)
+          if (rate > 15000 && rate < 17500) {
             console.log(`[USD/IDR] Rp ${rate.toLocaleString('id-ID')}`)
             return { rate }
           } else if (rate > 10000 && rate < 20000) {
@@ -592,24 +606,45 @@ async function fetchUSDIDRFromGoogle() {
 
       // Silent retry
       if (attempt < maxRetries) {
-        await new Promise(r => setTimeout(r, 3000))
+        await new Promise(r => setTimeout(r, 5000))
       }
 
     } catch (err) {
       // Only log on final attempt
       if (attempt === maxRetries) {
-        console.log(`[USD/IDR] Error: ${err.message}`)
+        console.log(`[USD/IDR] Error: ${err.message}, using fallback`)
       }
 
       if (attempt < maxRetries) {
-        await new Promise(r => setTimeout(r, 3000))
+        await new Promise(r => setTimeout(r, 5000))
       }
     }
   }
 
-  // After all retries failed, use a more recent default
-  console.log('[USD/IDR] Using fallback: Rp 15,900')
-  return { rate: 15900 } // More realistic current rate
+  // Try alternative sources before using fallback
+  try {
+    const res = await fetch('https://api.exchangerate-api.com/v4/latest/USD', {
+      signal: AbortSignal.timeout(3000)
+    })
+    if (res.ok) {
+      const json = await res.json()
+      const rate = json.rates?.IDR
+      if (rate && rate > 15000 && rate < 18000) {
+        console.log(`[USD/IDR] ExchangeRate API: Rp ${rate.toLocaleString('id-ID')}`)
+        return { rate }
+      }
+    }
+  } catch (_) {}
+
+  // After all attempts failed, use cached value or default
+  if (cachedMarketData.usdIdr && cachedMarketData.usdIdr.rate) {
+    console.log(`[USD/IDR] Using last known: Rp ${cachedMarketData.usdIdr.rate.toLocaleString('id-ID')}`)
+    return cachedMarketData.usdIdr;
+  }
+
+  // Use realistic current rate as final fallback
+  console.log('[USD/IDR] Using default fallback: Rp 16,700')
+  return { rate: 16700 } // More realistic current rate
 }
 
 async function fetchXAUUSDFromTradingView() {
@@ -957,7 +992,7 @@ async function fetchTreasury() {
   const res = await fetch(TREASURY_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    signal: AbortSignal.timeout(3000)
+    signal: AbortSignal.timeout(2000) // Reduced timeout for faster response
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const json = await res.json()
@@ -967,55 +1002,97 @@ async function fetchTreasury() {
   return json
 }
 
-// ⚡ UPDATED BROADCAST FUNCTION dengan validasi timestamp
+// ⚡ SUPER INSTANT BROADCAST FUNCTION - OPTIMIZED FOR SPEED
+let lastBroadcastMessageId = null;
+let lastBroadcastContent = null;
+
 async function doBroadcast(priceChange, priceData) {
-  // Skip all checks for speed
+  // Quick exit if not ready
   if (isBroadcasting || !sock || !isReady || subscriptions.size === 0) return
 
-  isBroadcasting = true
-  broadcastCount++
-  const currentBroadcastId = broadcastCount
+  // Super fast duplicate check
+  const contentHash = `${priceData.buy}-${priceData.sell}`;
+  if (lastBroadcastContent === contentHash && (Date.now() - lastBroadcastTime) < 3000) {
+    return; // Silent skip for speed
+  }
+
+  isBroadcasting = true;
+  broadcastCount++;
+  const bcId = broadcastCount;
 
   try {
-    const startTime = Date.now()
+    // Store hash IMMEDIATELY
+    lastBroadcastContent = contentHash;
 
-    // Build message FAST
-    const treasuryData = {
+    // Build message SUPER FAST - pre-cached market data
+    const msg = formatMessage({
       data: {
         buying_rate: priceData.buy,
         selling_rate: priceData.sell,
         updated_at: priceData.updated_at
       }
-    }
+    }, cachedMarketData.usdIdr.rate, cachedMarketData.xauUsd, priceChange, cachedMarketData.economicEvents);
 
-    const message = formatMessage(treasuryData, cachedMarketData.usdIdr.rate, cachedMarketData.xauUsd, priceChange, cachedMarketData.economicEvents)
+    const t0 = Date.now();
+    pushLog(`⚡ [#${bcId}] INSTANT broadcast to ${subscriptions.size} subs...`);
 
-    pushLog(`📤 [#${currentBroadcastId}] Sending to ${subscriptions.size} subs...`)
-    
-    // ULTRA FAST: Send immediately without tracking
+    // FIRE AND FORGET - No waiting!
     subscriptions.forEach(chatId => {
-      sock.sendMessage(chatId, { text: message }).catch(() => {})
-    })
+      sock.sendMessage(chatId, { text: msg }).catch(() => {});
+    });
 
-    pushLog(`📤 [#${currentBroadcastId}] Broadcast fired!`)
-    
+    pushLog(`✅ [#${bcId}] Fired in ${Date.now() - t0}ms!`)
+
   } catch (e) {
-    pushLog(`❌ Broadcast #${currentBroadcastId} error: ${e.message}`)
+    pushLog(`❌ Broadcast #${bcId} error: ${e.message}`)
   } finally {
-    // ALWAYS release flag in finally block
-    isBroadcasting = false
+    // Quick release
+    isBroadcasting = false;
   }
 }
 
 async function checkPriceUpdate() {
   if (!isReady || subscriptions.size === 0) return
 
+  // Prevent concurrent price checks
+  if (isCheckingPrice) {
+    console.log('[Price Check] Already checking, skipping...');
+    return;
+  }
+
+  isCheckingPrice = true;
+
   try {
-    const treasuryData = await fetchTreasury()
+    // Add timeout and retry for treasury fetch
+    let treasuryData = null;
+    let fetchAttempts = 0;
+    const maxAttempts = 2;
+
+    while (fetchAttempts < maxAttempts && !treasuryData) {
+      try {
+        treasuryData = await fetchTreasury();
+      } catch (e) {
+        fetchAttempts++;
+        if (fetchAttempts < maxAttempts) {
+          console.log(`[Treasury] Retry ${fetchAttempts}/${maxAttempts} after error: ${e.message}`);
+          await new Promise(r => setTimeout(r, 2000));
+        } else {
+          console.log(`[Treasury] Failed after ${maxAttempts} attempts: ${e.message}`);
+          return; // Skip this update cycle
+        }
+      }
+    }
+
+    // Validate treasury data
+    if (!treasuryData?.data?.buying_rate || !treasuryData?.data?.selling_rate) {
+      console.log('[Treasury] Invalid data received, skipping update');
+      return;
+    }
+
     const currentPrice = {
-      buy: treasuryData?.data?.buying_rate,
-      sell: treasuryData?.data?.selling_rate,
-      updated_at: treasuryData?.data?.updated_at,
+      buy: treasuryData.data.buying_rate,
+      sell: treasuryData.data.selling_rate,
+      updated_at: treasuryData.data.updated_at,
       fetchedAt: Date.now()
     }
 
@@ -1193,31 +1270,32 @@ async function checkPriceUpdate() {
       fetchedAt: currentPrice.fetchedAt
     }
     
-    // ULTRA INSTANT BROADCAST - Fire immediately without any validation
-    setImmediate(() => {
-      doBroadcast(finalPriceChange, currentPrice).catch(e => {
-        pushLog(`❌ Broadcast promise error: ${e.message}`)
-      })
+    // ULTRA INSTANT BROADCAST - Fire immediately without delay
+    doBroadcast(finalPriceChange, currentPrice).catch(e => {
+      pushLog(`❌ Broadcast promise error: ${e.message}`)
     })
     
   } catch (e) {
-    // Silent fail
+    console.log('[Price Check] Error:', e.message);
+  } finally {
+    // Always release the mutex
+    isCheckingPrice = false;
   }
 }
 
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 
-console.log(`✅ Broadcast: 50s cooldown OR new minute OR stale price (5m+)`)
-console.log(`📊 Price check: every ${PRICE_CHECK_INTERVAL/1000}s (ULTRA REAL-TIME!)`)
+console.log(`⚡ SUPER INSTANT MODE ACTIVATED! ⚡`)
+console.log(`✅ Broadcast: ${BROADCAST_COOLDOWN/1000}s cooldown OR new minute`)
+console.log(`🚀 Price check: every ${PRICE_CHECK_INTERVAL}ms (0.5 SECOND - SUPER INSTANT!)`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
 console.log(`⏱️  Stale price threshold: ${STALE_PRICE_THRESHOLD/60000} minutes`)
 console.log(`🔧 XAU/USD cache: ${XAU_CACHE_DURATION/1000}s`)
 console.log(`📅 Economic calendar: USD High-Impact (auto-hide 3hrs, WIB)`)
-console.log(`⚡ Batch size: ${BATCH_SIZE} messages`)
-console.log(`⚡ Batch delay: ${BATCH_DELAY}ms`)
+console.log(`⚡ INSTANT delivery: FIRE & FORGET mode`)
 console.log(`🌍 XAU/USD: TradingView → Investing → Google`)
-console.log(`🐛 Race condition: FIXED`)
-console.log(`⏰ Timestamp validation: ACTIVE\n`)
+console.log(`💨 USD/IDR: 20s interval with smart caching`)
+console.log(`🐛 Double broadcast: PREVENTED\n`)
 
 const app = express()
 app.use(express.json())
