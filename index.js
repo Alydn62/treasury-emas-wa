@@ -67,6 +67,10 @@ let reconnectAttempts = 0
 const MAX_RECONNECT_ATTEMPTS = 10
 const BASE_RECONNECT_DELAY = 5000
 
+// Track failed broadcasts
+let failedBroadcastCount = 0
+const MAX_FAILED_BROADCASTS = 3
+
 // ------ STATE ------
 let lastQr = null
 const logs = []
@@ -1047,7 +1051,7 @@ async function doBroadcast(priceChange, priceData) {
     const t0 = Date.now();
     pushLog(`⚡ [#${bcId}] INSTANT broadcast to ${subscriptions.size} subs...`);
 
-    // FIRE AND FORGET - No waiting!
+    // FIRE AND FORGET - Simple and working
     subscriptions.forEach(chatId => {
       sock.sendMessage(chatId, { text: msg }).catch(() => {});
     });
@@ -1088,14 +1092,53 @@ async function checkPriceUpdate() {
           await new Promise(r => setTimeout(r, 2000));
         } else {
           console.log(`[Treasury] Failed after ${maxAttempts} attempts: ${e.message}`);
-          return; // Skip this update cycle
+
+          // IMPORTANT: Continue with last known price if available
+          if (lastKnownPrice) {
+            const now = Date.now();
+            const currentDate = new Date(now);
+            const currentMinute = currentDate.getHours() * 60 + currentDate.getMinutes();
+            const isNewMinute = currentMinute !== lastBroadcastMinute;
+
+            // Still broadcast every minute even if no new data
+            if (isNewMinute) {
+              console.log('[Treasury] Using last known price for broadcast');
+
+              // Update minute tracker
+              lastBroadcastMinute = currentMinute;
+              lastBroadcastTime = now;
+
+              // Broadcast with last known price
+              doBroadcast({ buyChange: 0, sellChange: 0 }, lastKnownPrice).catch(e => {
+                pushLog(`❌ Broadcast error: ${e.message}`)
+              });
+            }
+          }
+          return;
         }
       }
     }
 
     // Validate treasury data
     if (!treasuryData?.data?.buying_rate || !treasuryData?.data?.selling_rate) {
-      console.log('[Treasury] Invalid data received, skipping update');
+      console.log('[Treasury] Invalid data received');
+
+      // Still broadcast with last known price if new minute
+      if (lastKnownPrice) {
+        const now = Date.now();
+        const currentDate = new Date(now);
+        const currentMinute = currentDate.getHours() * 60 + currentDate.getMinutes();
+        const isNewMinute = currentMinute !== lastBroadcastMinute;
+
+        if (isNewMinute) {
+          console.log('[Treasury] Broadcasting with last known price');
+          lastBroadcastMinute = currentMinute;
+          lastBroadcastTime = now;
+          doBroadcast({ buyChange: 0, sellChange: 0 }, lastKnownPrice).catch(e => {
+            pushLog(`❌ Broadcast error: ${e.message}`)
+          });
+        }
+      }
       return;
     }
 
@@ -1183,12 +1226,14 @@ async function checkPriceUpdate() {
     // 🔥 ADA PERUBAHAN HARGA!
     const buyChangeSinceBroadcast = Math.abs(currentPrice.buy - (lastBroadcastedPrice?.buy || currentPrice.buy))
     const sellChangeSinceBroadcast = Math.abs(currentPrice.sell - (lastBroadcastedPrice?.sell || currentPrice.sell))
-    
-    if (buyChangeSinceBroadcast < MIN_PRICE_CHANGE && sellChangeSinceBroadcast < MIN_PRICE_CHANGE) {
-      lastKnownPrice = currentPrice
-      lastPriceUpdateTime = now  // Update timestamp meskipun perubahan kecil
-      return
-    }
+
+    // Remove price change threshold check - always continue to minute check
+    // This ensures broadcast every minute regardless of price change
+    // if (buyChangeSinceBroadcast < MIN_PRICE_CHANGE && sellChangeSinceBroadcast < MIN_PRICE_CHANGE) {
+    //   lastKnownPrice = currentPrice
+    //   lastPriceUpdateTime = now
+    //   return
+    // }
     
     const timeSinceLastBroadcast = now - lastBroadcastTime
     
@@ -1203,6 +1248,11 @@ async function checkPriceUpdate() {
     // 2. ATAU sudah lewat cooldown 50 detik
 
     const shouldBroadcast = isNewMinute || timeSinceLastBroadcast >= BROADCAST_COOLDOWN
+
+    // Log every minute to show bot is alive
+    if (isNewMinute && !shouldBroadcast) {
+      console.log(`[${new Date().toISOString().substring(11, 19)}] Price stable, waiting for changes...`);
+    }
     
     if (!shouldBroadcast) {
       const priceChange = {
@@ -1494,7 +1544,7 @@ async function start() {
 
   sock.ev.on('messages.upsert', async (ev) => {
     if (!isReady || ev.type !== 'notify') return
-    
+
     for (const msg of ev.messages) {
       try {
         if (shouldIgnoreMessage(msg)) continue
