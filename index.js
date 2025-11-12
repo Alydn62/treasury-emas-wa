@@ -80,31 +80,44 @@ const subscriptions = new Set()
 
 // ⚡ CACHE GLOBAL untuk market data (pre-fetched)
 let cachedMarketData = {
-  usdIdr: { rate: 16600 }, // Updated default to current market rate
+  usdIdr: null, // No default - Google Finance only
   xauUsd: null,
   economicEvents: null,
   lastUpdate: 0
 }
 
 // Background task untuk pre-fetch market data
-// USD/IDR fetched every 20 seconds to avoid errors
+// USD/IDR fetched every 10 seconds for REALTIME updates
 // XAU/USD and calendar updated every 5 seconds
 let lastUSDIDRFetch = 0;
-const USD_IDR_FETCH_INTERVAL = 20000; // 20 seconds interval for USD/IDR
+const USD_IDR_FETCH_INTERVAL = 10000; // 10 seconds for REALTIME USD/IDR
 
 setInterval(async () => {
   try {
     const now = Date.now();
 
-    // Fetch USD/IDR every 20 seconds
-    let usdIdr = cachedMarketData.usdIdr;
+    // Fetch USD/IDR every 10 seconds for realtime updates
     if (now - lastUSDIDRFetch >= USD_IDR_FETCH_INTERVAL) {
       try {
-        usdIdr = await fetchUSDIDRFromGoogle();
-        lastUSDIDRFetch = now;
+        const newRate = await fetchUSDIDRFromGoogle();
+        if (newRate && newRate.rate) {
+          // Got new rate - update cache
+          cachedMarketData.usdIdr = newRate;
+          lastUSDIDRFetch = now;
+
+          // Log only if rate changed significantly (more than 5 rupiah)
+          if (!cachedMarketData.usdIdr ||
+              Math.abs(newRate.rate - (cachedMarketData.usdIdr.rate || 0)) > 5) {
+            console.log(`[USD/IDR] Updated: Rp ${newRate.rate.toLocaleString('id-ID')}`);
+          }
+        } else {
+          // Failed to get new rate - keep using cached value
+          if (cachedMarketData.usdIdr && cachedMarketData.usdIdr.rate) {
+            // We have cached value - continue using it
+          }
+        }
       } catch (e) {
-        console.log('[USD/IDR] Fetch error, keeping cached value:', e.message);
-        // Keep old USD/IDR if fetch fails
+        // Error fetching - keep using cached value silently
       }
     }
 
@@ -114,17 +127,17 @@ setInterval(async () => {
       fetchEconomicCalendar()
     ]);
 
+    // Update market data - keep USD/IDR if not changed
     cachedMarketData = {
-      usdIdr,
+      usdIdr: cachedMarketData.usdIdr, // Keep existing value (updated above if new data)
       xauUsd,
       economicEvents,
       lastUpdate: Date.now()
     }
   } catch (e) {
-    console.log('[Market Data] Update error:', e.message);
-    // Silent fail - keep old cache
+    // Silent fail
   }
-}, 5000) // Check every 5 seconds, USD/IDR with 20s interval
+}, 5000) // Check every 5 seconds, USD/IDR checked every 10s
 
 function pushLog(s) {
   const logMsg = `${new Date().toISOString().substring(11, 19)} ${s}`
@@ -508,22 +521,18 @@ async function fetchUSDIDRFallback() {
 }
 
 async function fetchUSDIDRFromGoogle() {
-  const maxRetries = 2 // Reduced retries for faster fallback
+  const maxRetries = 1 // Single attempt for faster updates
   let attempt = 0
 
-  // Check if we have a recent cached value (less than 1 minute old)
-  if (cachedMarketData.usdIdr && cachedMarketData.usdIdr.rate &&
-      cachedMarketData.lastUpdate && (Date.now() - cachedMarketData.lastUpdate < 60000)) {
-    // Silent - using cached value without logging
-    return cachedMarketData.usdIdr;
-  }
+  // No cache check here - let the caller decide
 
   while (attempt < maxRetries) {
     attempt++
 
     try {
-      // Only log first attempt
-      if (attempt === 1) {
+      // Log every 6th fetch (every minute) to reduce log spam
+      const shouldLog = (Date.now() / 10000) % 6 === 0;
+      if (shouldLog) {
         console.log(`[USD/IDR] Fetching from Google Finance...`)
       }
 
@@ -544,15 +553,15 @@ async function fetchUSDIDRFromGoogle() {
           'Sec-Fetch-User': '?1',
           'Upgrade-Insecure-Requests': '1'
         },
-        signal: AbortSignal.timeout(15000) // Increased timeout to 15 seconds
+        signal: AbortSignal.timeout(8000) // Reduced to 8 seconds for faster response
       })
 
       if (!res.ok) {
         if (attempt === maxRetries) {
-          console.log(`[USD/IDR] Failed (HTTP ${res.status}), using fallback`)
+          // Silent fail - no log
         }
         if (attempt < maxRetries) {
-          await new Promise(r => setTimeout(r, 5000)) // Wait 5 seconds before retry
+          await new Promise(r => setTimeout(r, 2000)) // Wait 2 seconds before retry
           continue
         }
       }
@@ -561,6 +570,11 @@ async function fetchUSDIDRFromGoogle() {
 
       // More comprehensive patterns for Google Finance
       const patterns = [
+        // New patterns for latest Google Finance format
+        /data-value="([0-9,\.]+)"/i,
+        /data-last-value="([0-9,\.]+)"/i,
+        /<div[^>]*data-source="Google"[^>]*>([0-9,\.]+)<\/div>/i,
+
         // Primary patterns - most likely to work
         /class="YMlKec fxKbKc"[^>]*>([0-9,\.]+)<\/div>/i,
         /class="[^"]*fxKbKc[^"]*"[^>]*>([0-9,\.]+)<\/div>/i,
@@ -570,20 +584,27 @@ async function fetchUSDIDRFromGoogle() {
         // JSON-LD patterns
         /"price":\s*"([0-9,\.]+)"/i,
         /"value":\s*"([0-9,\.]+)"/i,
+        /"exchangeRate":\s*"([0-9,\.]+)"/i,
 
-        // Alternative div patterns
+        // Alternative div patterns with decimal
+        /<div[^>]*>([0-9]{1,2}[,\.][0-9]{3}\.[0-9]+)<\/div>/i,
         /<div[^>]*>([0-9]{1,2}[,\.][0-9]{3}(?:\.[0-9]+)?)<\/div>/i,
 
         // Specific Google Finance patterns
         /USD to IDR[^0-9]*([0-9]{1,2}[,\.][0-9]{3}(?:\.[0-9]+)?)/i,
         /1 USD = ([0-9]{1,2}[,\.][0-9]{3}(?:\.[0-9]+)?)/i,
+        /1 USD equals[^0-9]*([0-9]{1,2}[,\.][0-9]{3}(?:\.[0-9]+)?)/i,
 
         // Meta tag patterns
         /<meta[^>]*content="([0-9]{1,2}[,\.][0-9]{3}(?:\.[0-9]+)?)"[^>]*>/i,
+        /<meta[^>]*property="[^"]*price[^"]*"[^>]*content="([0-9,\.]+)"[^>]*>/i,
 
         // Broader patterns
         />([0-9]{2}[,\.][0-9]{3}(?:\.[0-9]+)?)</,
-        /USD\/IDR[^0-9]*([0-9]{1,2}[,\.][0-9]{3}(?:[,\.][0-9]+)?)/i
+        /USD\/IDR[^0-9]*([0-9]{1,2}[,\.][0-9]{3}(?:[,\.][0-9]+)?)/i,
+
+        // Look for exact match like "16,758.80"
+        /([0-9]{2},[0-9]{3}\.[0-9]{1,2})/i
       ]
 
       // Silent parsing - no log needed
@@ -593,59 +614,28 @@ async function fetchUSDIDRFromGoogle() {
         if (match?.[1]) {
           const rate = parseFloat(match[1].replace(/,/g, ''))
 
-          // Validate rate is in reasonable range for IDR (15000-17500)
-          if (rate > 15000 && rate < 17500) {
-            console.log(`[USD/IDR] Rp ${rate.toLocaleString('id-ID')}`)
+          // Validate rate is in reasonable range for IDR (15000-18000)
+          if (rate > 15000 && rate < 18000) {
+            // Success - return new rate (log handled by caller)
             return { rate }
           } else if (rate > 10000 && rate < 20000) {
             // Wider range as fallback
-            console.log(`[USD/IDR] Rp ${rate.toLocaleString('id-ID')} (unusual)`)
             return { rate }
           }
         }
       }
 
-      // Silent retry
-      if (attempt < maxRetries) {
-        await new Promise(r => setTimeout(r, 5000))
-      }
+      // No valid rate found in HTML
+      return null;
 
     } catch (err) {
-      // Only log on final attempt
-      if (attempt === maxRetries) {
-        console.log(`[USD/IDR] Error: ${err.message}, using fallback`)
-      }
-
-      if (attempt < maxRetries) {
-        await new Promise(r => setTimeout(r, 5000))
-      }
+      // Silent fail
+      return null;
     }
   }
 
-  // Try alternative sources before using fallback
-  try {
-    const res = await fetch('https://api.exchangerate-api.com/v4/latest/USD', {
-      signal: AbortSignal.timeout(3000)
-    })
-    if (res.ok) {
-      const json = await res.json()
-      const rate = json.rates?.IDR
-      if (rate && rate > 15000 && rate < 18000) {
-        console.log(`[USD/IDR] ExchangeRate API: Rp ${rate.toLocaleString('id-ID')}`)
-        return { rate }
-      }
-    }
-  } catch (_) {}
-
-  // After all attempts failed, use cached value or default
-  if (cachedMarketData.usdIdr && cachedMarketData.usdIdr.rate) {
-    console.log(`[USD/IDR] Using last known: Rp ${cachedMarketData.usdIdr.rate.toLocaleString('id-ID')}`)
-    return cachedMarketData.usdIdr;
-  }
-
-  // Use realistic current rate as final fallback
-  console.log('[USD/IDR] Using default fallback: Rp 16,700')
-  return { rate: 16700 } // More realistic current rate
+  // If all attempts failed, return null (caller will use cached value)
+  return null;
 }
 
 async function fetchXAUUSDFromTradingView() {
@@ -879,8 +869,8 @@ function analyzePriceStatus(treasuryBuy, treasurySell, xauUsdPrice, usdIdrRate) 
   if (!xauUsdPrice || !usdIdrRate) {
     return {
       status: 'DATA_INCOMPLETE',
-      message: '⚠️ Data Incomplete',
-      emoji: '⚠️'
+      message: '', // Don't show status if data incomplete
+      emoji: ''
     }
   }
 
@@ -974,7 +964,16 @@ function formatMessage(treasuryData, usdIdrRate, xauUsdPrice = null, priceChange
     statusSection = `\n${priceStatus.message}`
   }
 
-  let marketSection = `💱 USD Rp${formatRupiah(Math.round(usdIdrRate))}`
+  let marketSection = ''
+
+  if (usdIdrRate && usdIdrRate > 0) {
+    marketSection = `💱 USD Rp${formatRupiah(Math.round(usdIdrRate))}`
+  } else if (cachedMarketData.usdIdr && cachedMarketData.usdIdr.rate) {
+    // Use cached value if current fetch failed
+    marketSection = `💱 USD Rp${formatRupiah(Math.round(cachedMarketData.usdIdr.rate))}`
+  } else {
+    marketSection = `💱 USD [Waiting data...]`
+  }
 
   if (xauUsdPrice) {
     marketSection += ` | XAU $${xauUsdPrice.toFixed(2)}`
@@ -1036,13 +1035,14 @@ async function doBroadcast(priceChange, priceData) {
     lastBroadcastContent = contentHash;
 
     // Build message SUPER FAST - pre-cached market data
+    const usdRate = cachedMarketData.usdIdr ? cachedMarketData.usdIdr.rate : null;
     const msg = formatMessage({
       data: {
         buying_rate: priceData.buy,
         selling_rate: priceData.sell,
         updated_at: priceData.updated_at
       }
-    }, cachedMarketData.usdIdr.rate, cachedMarketData.xauUsd, priceChange, cachedMarketData.economicEvents);
+    }, usdRate, cachedMarketData.xauUsd, priceChange, cachedMarketData.economicEvents);
 
     const t0 = Date.now();
     pushLog(`⚡ [#${bcId}] INSTANT broadcast to ${subscriptions.size} subs...`);
@@ -1298,7 +1298,7 @@ console.log(`⏱️  Cooldown: ${BROADCAST_COOLDOWN/1000}s between broadcasts`)
 console.log(`🔧 XAU/USD cache: ${XAU_CACHE_DURATION/1000}s`)
 console.log(`📅 Economic calendar: USD High-Impact`)
 console.log(`⚡ Delivery: INSTANT (fire & forget)`)
-console.log(`💨 USD/IDR: 20s interval`)
+console.log(`💱 USD/IDR: REALTIME updates every 10s (Google Finance only)`)
 console.log(`🐛 Double broadcast: FIXED with minute tracking\n`)
 
 const app = express()
