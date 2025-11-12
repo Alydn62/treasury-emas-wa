@@ -20,9 +20,9 @@ const GLOBAL_THROTTLE = 3000
 const TYPING_DURATION = 2000
 
 // BROADCAST COOLDOWN
-const PRICE_CHECK_INTERVAL = 500 // 0.5 DETIK - SUPER ULTRA REAL-TIME!
+const PRICE_CHECK_INTERVAL = 1000 // 1 DETIK - Check setiap detik
 const MIN_PRICE_CHANGE = 1
-const BROADCAST_COOLDOWN = 30000 // 30 detik antar broadcast (atau ganti menit) - LEBIH CEPAT!
+const BROADCAST_COOLDOWN = 50000 // 50 detik antar broadcast (atau ganti menit)
 
 // Economic Calendar Settings
 const ECONOMIC_CALENDAR_ENABLED = true
@@ -56,6 +56,7 @@ let isBroadcasting = false
 let broadcastCount = 0
 let lastBroadcastTime = 0
 let isCheckingPrice = false // Mutex to prevent concurrent price checks
+let lastBroadcastMinute = -1 // Track last broadcast minute to prevent duplicates
 
 // ⏱️ STALE PRICE DETECTION
 let lastPriceUpdateTime = 0  // Kapan terakhir harga berubah dari API
@@ -513,7 +514,7 @@ async function fetchUSDIDRFromGoogle() {
   // Check if we have a recent cached value (less than 1 minute old)
   if (cachedMarketData.usdIdr && cachedMarketData.usdIdr.rate &&
       cachedMarketData.lastUpdate && (Date.now() - cachedMarketData.lastUpdate < 60000)) {
-    console.log(`[USD/IDR] Using cached: Rp ${cachedMarketData.usdIdr.rate.toLocaleString('id-ID')}`);
+    // Silent - using cached value without logging
     return cachedMarketData.usdIdr;
   }
 
@@ -828,23 +829,33 @@ async function fetchXAUUSDFromGoogle() {
 async function fetchXAUUSD() {
   let result = await fetchXAUUSDFromTradingView()
   if (result) {
-    console.log(`[XAU/USD] $${result.toFixed(2)}`)
+    // Log only significant changes (more than $2 difference)
+    if (!cachedXAUUSD || Math.abs(result - cachedXAUUSD) > 2) {
+      console.log(`[XAU/USD] $${result.toFixed(2)}`)
+    }
     return result
   }
 
   result = await fetchXAUUSDFromInvesting()
   if (result) {
-    console.log(`[XAU/USD] $${result.toFixed(2)}`)
+    if (!cachedXAUUSD || Math.abs(result - cachedXAUUSD) > 2) {
+      console.log(`[XAU/USD] $${result.toFixed(2)}`)
+    }
     return result
   }
 
   result = await fetchXAUUSDFromGoogle()
   if (result) {
-    console.log(`[XAU/USD] $${result.toFixed(2)}`)
+    if (!cachedXAUUSD || Math.abs(result - cachedXAUUSD) > 2) {
+      console.log(`[XAU/USD] $${result.toFixed(2)}`)
+    }
     return result
   }
 
-  console.log('[XAU/USD] Failed - no data')
+  // Only log failure once per minute
+  if (!cachedXAUUSD || (Date.now() - lastXAUUSDFetch) > 60000) {
+    console.log('[XAU/USD] Failed - no data')
+  }
   return null
 }
 
@@ -1054,10 +1065,9 @@ async function doBroadcast(priceChange, priceData) {
 async function checkPriceUpdate() {
   if (!isReady || subscriptions.size === 0) return
 
-  // Prevent concurrent price checks
+  // Prevent concurrent price checks - SILENT
   if (isCheckingPrice) {
-    console.log('[Price Check] Already checking, skipping...');
-    return;
+    return; // Silent skip - no log spam
   }
 
   isCheckingPrice = true;
@@ -1182,23 +1192,17 @@ async function checkPriceUpdate() {
     
     const timeSinceLastBroadcast = now - lastBroadcastTime
     
-    // Cek apakah sudah ganti menit
-    const lastBroadcastDate = new Date(lastBroadcastTime)
+    // Cek apakah sudah ganti menit DAN belum broadcast di menit ini
     const currentDate = new Date(now)
-    const lastMinute = lastBroadcastDate.getHours() * 60 + lastBroadcastDate.getMinutes()
     const currentMinute = currentDate.getHours() * 60 + currentDate.getMinutes()
-    const isNewMinute = currentMinute !== lastMinute
+    const isNewMinute = currentMinute !== lastBroadcastMinute
     
-    // 🎯 LOGIKA BROADCAST:
-    // 1. Jika status berubah ke TIDAK NORMAL → BROADCAST LANGSUNG (prioritas tinggi!)
-    // 2. Jika harga stale (5+ menit tidak update) → BROADCAST LANGSUNG saat ada update baru
-    // 3. Jika harga tidak stale → ikuti cooldown normal (50 detik ATAU ganti menit)
+    // 🎯 LOGIKA BROADCAST SEDERHANA:
+    // Broadcast HANYA jika:
+    // 1. Sudah ganti menit (1 menit = 1 broadcast)
+    // 2. ATAU sudah lewat cooldown 50 detik
 
-    const shouldBroadcast = statusChanged && currentStatus === 'ABNORMAL'
-      ? true  // Langsung broadcast jika status berubah ke TIDAK NORMAL
-      : isPriceStale
-      ? true  // Langsung broadcast jika harga baru setelah 5 menit stale
-      : (timeSinceLastBroadcast >= BROADCAST_COOLDOWN || isNewMinute)
+    const shouldBroadcast = isNewMinute || timeSinceLastBroadcast >= BROADCAST_COOLDOWN
     
     if (!shouldBroadcast) {
       const priceChange = {
@@ -1262,14 +1266,15 @@ async function checkPriceUpdate() {
       return
     }
     
-    // Update timestamp dan price SEBELUM broadcast dimulai
+    // Update timestamp, minute tracker dan price SEBELUM broadcast dimulai
     lastBroadcastTime = now
+    lastBroadcastMinute = currentMinute // IMPORTANT: Track minute to prevent double broadcast
     lastBroadcastedPrice = {
       buy: currentPrice.buy,
       sell: currentPrice.sell,
       fetchedAt: currentPrice.fetchedAt
     }
-    
+
     // ULTRA INSTANT BROADCAST - Fire immediately without delay
     doBroadcast(finalPriceChange, currentPrice).catch(e => {
       pushLog(`❌ Broadcast promise error: ${e.message}`)
@@ -1285,17 +1290,16 @@ async function checkPriceUpdate() {
 
 setInterval(checkPriceUpdate, PRICE_CHECK_INTERVAL)
 
-console.log(`⚡ SUPER INSTANT MODE ACTIVATED! ⚡`)
-console.log(`✅ Broadcast: ${BROADCAST_COOLDOWN/1000}s cooldown OR new minute`)
-console.log(`🚀 Price check: every ${PRICE_CHECK_INTERVAL}ms (0.5 SECOND - SUPER INSTANT!)`)
+console.log(`⚡ OPTIMIZED BROADCAST SYSTEM ⚡`)
+console.log(`✅ Broadcast: Every NEW MINUTE (once per minute max)`)
+console.log(`🚀 Price check: every ${PRICE_CHECK_INTERVAL/1000}s`)
 console.log(`📊 Min price change: ±Rp${MIN_PRICE_CHANGE}`)
-console.log(`⏱️  Stale price threshold: ${STALE_PRICE_THRESHOLD/60000} minutes`)
+console.log(`⏱️  Cooldown: ${BROADCAST_COOLDOWN/1000}s between broadcasts`)
 console.log(`🔧 XAU/USD cache: ${XAU_CACHE_DURATION/1000}s`)
-console.log(`📅 Economic calendar: USD High-Impact (auto-hide 3hrs, WIB)`)
-console.log(`⚡ INSTANT delivery: FIRE & FORGET mode`)
-console.log(`🌍 XAU/USD: TradingView → Investing → Google`)
-console.log(`💨 USD/IDR: 20s interval with smart caching`)
-console.log(`🐛 Double broadcast: PREVENTED\n`)
+console.log(`📅 Economic calendar: USD High-Impact`)
+console.log(`⚡ Delivery: INSTANT (fire & forget)`)
+console.log(`💨 USD/IDR: 20s interval`)
+console.log(`🐛 Double broadcast: FIXED with minute tracking\n`)
 
 const app = express()
 app.use(express.json())
